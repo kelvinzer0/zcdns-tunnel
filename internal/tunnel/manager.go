@@ -20,9 +20,6 @@ type Manager struct {
 
 	// domainForwardedPorts maps domain to the actual port bound for remote forwarding
 	domainForwardedPorts sync.Map // map[string]uint32
-
-	// httpRequests maps domain to a boolean indicating if it's an HTTP reverse proxy request
-	httpRequests sync.Map // map[string]bool
 }
 
 // NewManager creates a new tunnel manager.
@@ -69,9 +66,6 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 
 	// Also remove the domain-to-port mapping
 	m.domainForwardedPorts.Delete(domain)
-
-	// Also remove the HTTP request status
-	m.httpRequests.Delete(domain)
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
@@ -136,24 +130,6 @@ func (m *Manager) DeleteDomainForwardedPort(domain string) {
 	logrus.WithFields(logrus.Fields{
 		"domain": domain,
 	}).Info("Removed domain forwarded port.")
-}
-
-// StoreHttpRequest marks a domain as requesting an HTTP reverse proxy.
-func (m *Manager) StoreHttpRequest(domain string) {
-	m.httpRequests.Store(domain, true)
-	logrus.WithFields(logrus.Fields{
-		"domain": domain,
-	}).Info("Stored HTTP reverse proxy request for domain.")
-}
-
-// IsHttpRequest checks if a domain has requested an HTTP reverse proxy.
-func (m *Manager) IsHttpRequest(domain string) bool {
-	val, ok := m.httpRequests.Load(domain)
-	if !ok {
-		return false
-	}
-	isHttp, ok := val.(bool)
-	return isHttp && ok
 }
 
 // RemoteForwardedPort represents a port opened for remote forwarding on the server.
