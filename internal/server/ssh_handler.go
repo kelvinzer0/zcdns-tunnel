@@ -67,6 +67,11 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerCo
 	domain, ok := sshConn.Permissions.Extensions["domain"]
 	if ok && domain != "" {
 		s.Manager.StoreClient(domain, sshConn)
+
+		// Check if this is an HTTP proxy connection
+		if isHTTPProxyStr, isHTTPProxyOk := sshConn.Permissions.Extensions["is_http_proxy"]; isHTTPProxyOk && isHTTPProxyStr == "true" {
+			s.Manager.StoreHttpRequest(domain)
+		}
 	}
 
 	// Handle global requests (e.g., tcpip-forward for -R)
@@ -103,7 +108,7 @@ func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.Ne
 	case "forwarded-tcpip":
 		channelHandlers.HandleForwardedTCPIP(sshConn, newChannel)
 	case "session":
-		channelHandlers.HandleSession(sshConn, newChannel, s.Manager)
+		channelHandlers.HandleSession(sshConn, newChannel)
 	default:
 		channelHandlers.HandleUnsupportedChannel(sshConn, newChannel)
 	}

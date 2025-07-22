@@ -28,9 +28,9 @@ This project provides a stateless, dynamic SSH port forwarding solution that all
         ```
         (Traffic from `your-server.com:8080` goes to `localhost:80` on your local machine)
 
-    *   **HTTP Reverse Proxy (Shared Port 80):** To have the server act as a reverse proxy for your domain on the shared port 80, pass the `HTTP=TRUE` environment variable. The server will listen on a dynamic port and the central proxy on port 80 will forward requests for your domain to your local service.
+    *   **HTTP Reverse Proxy (Shared Port 80):** To have the server act as a reverse proxy for your domain on the shared port 80, use the `http.` prefix in your username. The server will listen on a dynamic port and the central proxy on port 80 will forward requests for your domain to your local service.
         ```bash
-        HTTP=TRUE ssh -N -f your-domain.com@your-server.com -p 2222 -R 0.0.0.0:0:localhost:8083
+        ssh -N -f http.your-domain.com@your-server.com -p 2222 -R 0.0.0.0:0:localhost:8083
         ```
         (Traffic from the internet to `http://your-domain.com` will be proxied by the server to `localhost:8083` on your local machine via the SSH tunnel. The server allocates a random port for the tunnel endpoint, but the central proxy handles the public-facing routing on port 80.)
 

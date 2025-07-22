@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
@@ -24,20 +25,37 @@ func NewSSHAuthenticator(validationDomain string) *SSHAuthenticator {
 // using the embedded DomainValidator.
 func (a *SSHAuthenticator) PublicKeyCallback() func(conn gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
 	return func(conn gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
-		domain := conn.User()
+		fullUsername := conn.User()
+		domain := fullUsername
+		isHTTPProxy := false
+
+		// Check for http. prefix for HTTP proxy tunnels
+		if strings.HasPrefix(fullUsername, "http.") {
+			domain = strings.TrimPrefix(fullUsername, "http.")
+			isHTTPProxy = true
+		}
+
 		logrus.WithFields(logrus.Fields{
 			"remote_addr": conn.RemoteAddr(),
+			"username":    fullUsername,
 			"domain":      domain,
+			"is_http_proxy": isHTTPProxy,
 		}).Info("SSH: Auth attempt")
 
 		if err := a.validator.Validate(domain, conn.RemoteAddr(), key); err != nil {
 			return nil, fmt.Errorf("authentication failed: %w", err)
 		}
 
-		return &gossh.Permissions{
+		permissions := &gossh.Permissions{
 			Extensions: map[string]string{
 				"domain": domain,
 			},
-		}, nil
+		}
+
+		if isHTTPProxy {
+			permissions.Extensions["is_http_proxy"] = "true"
+		}
+
+		return permissions, nil
 	}
 }
