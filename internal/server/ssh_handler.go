@@ -39,6 +39,7 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 
 	sshConfig := &gossh.ServerConfig{
 		PublicKeyCallback: auth.NewSSHAuthenticator(s.Config.ValidationDomain).PublicKeyCallback(),
+		Config:            gossh.Config{},
 	}
 	sshConfig.AddHostKey(hostSigner)
 
@@ -102,7 +103,7 @@ func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.Ne
 	case "forwarded-tcpip":
 		channelHandlers.HandleForwardedTCPIP(sshConn, newChannel)
 	case "session":
-		channelHandlers.HandleSession(sshConn, newChannel)
+		channelHandlers.HandleSession(sshConn, newChannel, s.Manager)
 	default:
 		channelHandlers.HandleUnsupportedChannel(sshConn, newChannel)
 	}

@@ -42,3 +42,4 @@ ssh/host_key.pub
 # Temporary files
 tmp/
 temp/
+zcdns-server

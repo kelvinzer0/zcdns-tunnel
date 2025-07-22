@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 
-	"zcdns-tunnel/internal/tunnel"
+	_ "zcdns-tunnel/internal/tunnel"
 )
 
 // handleGlobalRequests handles global SSH requests like tcpip-forward and cancel-tcpip-forward.

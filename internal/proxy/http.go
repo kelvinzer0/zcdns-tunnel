@@ -4,47 +4,56 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
+	"strings"
 
 	"github.com/sirupsen/logrus"
-
 	"zcdns-tunnel/internal/tunnel"
 )
 
-// NewHTTPProxy creates a new HTTP reverse proxy that forwards requests to dynamically allocated ports.
-func NewHTTPProxy(manager *tunnel.Manager) *httputil.ReverseProxy {
-	proxy := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			host := req.Host
-			logrus.WithFields(logrus.Fields{
-				"host":   host,
-				"path":   req.URL.Path,
-				"method": req.Method,
-			}).Info("HTTP Proxy: Received request")
+// HTTPProxy handles routing HTTP requests to the correct SSH tunnel.
+type HTTPProxy struct {
+	manager *tunnel.Manager
+}
 
-			// Find the dynamically allocated port for this domain
-			port, ok := manager.LoadDomainForwardedPort(host)
-			if !ok {
-				logrus.WithFields(logrus.Fields{
-					"host": host,
-				}).Warn("HTTP Proxy: No dynamically allocated port found for host")
-				// Set a dummy URL to prevent the proxy from trying to connect directly
-				req.URL.Scheme = "http"
-				req.URL.Host = "invalid.host"
-				return
-			}
+// NewHTTPProxy creates a new HTTPProxy handler.
+func NewHTTPProxy(manager *tunnel.Manager) http.Handler {
+	return &HTTPProxy{manager: manager}
+}
 
-			// The target URL for the proxy is the dynamically allocated port on localhost
-			req.URL.Scheme = "http"
-			req.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
-			req.Host = host // Preserve the original host header
-
-			logrus.WithFields(logrus.Fields{
-				"original_host": host,
-				"proxied_to":    req.URL.Host,
-			}).Info("HTTP Proxy: Directing request")
-		},
-		// Use default transport, as the connection is now to a local port
-		Transport: http.DefaultTransport,
+// ServeHTTP is the entry point for incoming HTTP requests.
+func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Extract domain from the Host header
+	domain := r.Host
+	if strings.Contains(domain, ":") {
+		domain = strings.Split(domain, ":")[0]
 	}
-	return proxy
+
+	// Check if this domain has registered for HTTP proxying
+	if !p.manager.IsHttpRequest(domain) {
+		logrus.WithFields(logrus.Fields{"domain": domain}).Warn("Received request for non-HTTP domain")
+		http.NotFound(w, r)
+		return
+	}
+
+	// Find the dynamically allocated port for this domain's tunnel
+	port, ok := p.manager.LoadDomainForwardedPort(domain)
+	if !ok {
+		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain is down or not found")
+		http.Error(w, "Tunnel not available", http.StatusBadGateway)
+		return
+	}
+
+	// Create the reverse proxy to the local port that is being forwarded to the client
+	targetURL, _ := url.Parse(fmt.Sprintf("http://localhost:%d", port))
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+	logrus.WithFields(logrus.Fields{
+		"domain":        domain,
+		"target_url":    targetURL.String(),
+		"source_ip":     r.RemoteAddr,
+		"request_uri":   r.RequestURI,
+	}).Info("Forwarding HTTP request")
+
+	proxy.ServeHTTP(w, r)
 }

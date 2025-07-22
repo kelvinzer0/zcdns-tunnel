@@ -28,11 +28,11 @@ This project provides a stateless, dynamic SSH port forwarding solution that all
         ```
         (Traffic from `your-server.com:8080` goes to `localhost:80` on your local machine)
 
-    *   **Shared Port 80 (HTTP Proxy):** For HTTP traffic on port 80, you only need to establish the SSH connection. The server will automatically route based on the `Host` header.
+    *   **HTTP Reverse Proxy (Shared Port 80):** To have the server act as a reverse proxy for your domain on the shared port 80, pass the `HTTP=TRUE` environment variable. The server will listen on a dynamic port and the central proxy on port 80 will forward requests for your domain to your local service.
         ```bash
-        ssh -N -f your-domain.com@your-server.com -p 2222
+        HTTP=TRUE ssh -N -f your-domain.com@your-server.com -p 2222 -R 0.0.0.0:0:localhost:8083
         ```
-        (Traffic from internet to `your-domain.com:80` will be routed to `localhost:80` on your local machine via the SSH tunnel)
+        (Traffic from the internet to `http://your-domain.com` will be proxied by the server to `localhost:8083` on your local machine via the SSH tunnel. The server allocates a random port for the tunnel endpoint, but the central proxy handles the public-facing routing on port 80.)
 
 3.  **Server-Side:** The Go application listens for SSH connections and HTTP requests on port 80. When a connection is received, it:
     *   Parses the username (for SSH) or `Host` header (for HTTP) to get the domain.
