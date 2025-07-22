@@ -1,0 +1,44 @@
+# Binaries for programs
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go build artifacts
+bin/
+main
+# If you use 'go build -o myapp'
+# myapp
+
+# Dependency directories (Go Modules)
+# vendor/
+
+# Editor/IDE specific files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+
+# Log files
+*.log
+
+# Environment variables
+.env
+.env.*
+config.yml # Ignore the actual runtime config, keep server.example.yml
+
+# SSH Host Keys (CRITICAL: DO NOT EXPOSE PRIVATE KEYS)
+ssh/host_key
+ssh/host_key.pub
+
+# Database files (if any were created locally)
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+tmp/
+temp/
