@@ -7,6 +7,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
@@ -135,6 +136,14 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerCo
 }
 
 func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan *gossh.Request, activeForwards map[string]struct{}) {
+	domain, ok := sshConn.Permissions.Extensions["domain"]
+	if !ok || domain == "" {
+		logrus.WithFields(logrus.Fields{
+			"remote_addr": sshConn.RemoteAddr(),
+		}).Error("No domain found in SSH connection permissions for global request")
+		return
+	}
+
 	for req := range reqs {
 		switch req.Type {
 		case "tcpip-forward":
@@ -160,33 +169,45 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 			s.mu.Lock()
 			proxy, exists := s.sniListeners[listenAddr]
 			if !exists {
-				// Create a new SNI proxy if one doesn't exist for this address
 				proxy = proxy_sni.NewSNIProxy(s.Manager, listenAddr)
 				s.sniListeners[listenAddr] = proxy
 				
 				listenerCtx, cancel := context.WithCancel(context.Background())
 				s.listenerCancelFuncs[listenAddr] = cancel
 
+				// Start listening in a goroutine
 				go func() {
 					if err := proxy.ListenAndServe(listenerCtx); err != nil {
 						logrus.Printf("SNI proxy on %s exited with error: %v", listenAddr, err)
 					}
-					// Clean up map entries if listener exits prematurely
-					s.mu.Lock()
-					if s.listenerRefCounts[listenAddr] <= 0 { // Only delete if no active forwards
-						delete(s.sniListeners, listenAddr)
-						delete(s.listenerRefCounts, listenAddr)
-						delete(s.listenerCancelFuncs, listenAddr)
-					}
-					s.mu.Unlock()
 				}()
 			}
 			s.listenerRefCounts[listenAddr]++
-			activeForwards[listenAddr] = struct{}{} // Mark this forward as active for this connection
+			activeForwards[listenAddr] = struct{}{}
 			s.mu.Unlock()
 
-			// Acknowledge the request
-			req.Reply(true, nil)
+			// IMPORTANT: Wait for the listener to be ready to get the actual port
+			actualPort, err := proxy.GetListenPort(5 * time.Second)
+			if err != nil {
+				logrus.WithFields(logrus.Fields{
+					"remote_addr": sshConn.RemoteAddr(),
+					"listen_addr": listenAddr,
+					logrus.ErrorKey: err,
+				}).Error("Failed to get actual listening port from proxy")
+				req.Reply(false, nil)
+				continue
+			}
+
+			// Store the actual port for the domain
+			s.Manager.StoreUserBindingPort(domain, actualPort)
+
+			// Acknowledge the request with the actual port
+			req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: actualPort}))
+			logrus.WithFields(logrus.Fields{
+				"remote_addr": sshConn.RemoteAddr(),
+				"listen_addr": listenAddr,
+				"actual_port": actualPort,
+			}).Info("Successfully acknowledged tcpip-forward request")
 
 		case "cancel-tcpip-forward":
 			var payload struct {
@@ -211,11 +232,8 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 			s.mu.Lock()
 			if _, exists := activeForwards[listenAddr]; exists {
 				s.listenerRefCounts[listenAddr]--
-				delete(activeForwards, listenAddr) // Remove from this connection's active forwards
+				delete(activeForwards, listenAddr)
 				if s.listenerRefCounts[listenAddr] <= 0 {
-					logrus.WithFields(logrus.Fields{
-						"listen_addr": listenAddr,
-					}).Info("Shutting down dynamic SNI listener as no more references")
 					if cancel, exists := s.listenerCancelFuncs[listenAddr]; exists {
 						cancel()
 						delete(s.sniListeners, listenAddr)
@@ -223,20 +241,11 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 						delete(s.listenerCancelFuncs, listenAddr)
 					}
 				}
-			} else {
-				logrus.WithFields(logrus.Fields{
-					"remote_addr": sshConn.RemoteAddr(),
-					"listen_addr": listenAddr,
-				}).Warn("Received cancel-tcpip-forward for an unknown or inactive forward for this connection")
 			}
 			s.mu.Unlock()
 			req.Reply(true, nil)
 
 		default:
-			logrus.WithFields(logrus.Fields{
-				"remote_addr":  sshConn.RemoteAddr(),
-				"request_type": req.Type,
-			}).Warn("Unknown global request type")
 			if req.WantReply {
 				req.Reply(false, nil)
 			}

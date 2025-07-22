@@ -24,7 +24,7 @@ type SNIProxy struct {
 	Manager    *tunnel.Manager
 	ListenAddr string
 	listener   net.Listener
-	mu         sync.Mutex
+	listenerMu sync.Mutex
 }
 
 // NewSNIProxy creates a new SNIProxy handler.
@@ -32,6 +32,28 @@ func NewSNIProxy(manager *tunnel.Manager, listenAddr string) *SNIProxy {
 	return &SNIProxy{
 		Manager:    manager,
 		ListenAddr: listenAddr,
+	}
+}
+
+// GetListenPort waits for the listener to be initialized and returns the actual listening port.
+// This is crucial for handling dynamic port allocation (when listenAddr is ":0").
+func (p *SNIProxy) GetListenPort(timeout time.Duration) (uint32, error) {
+	deadline := time.After(timeout)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			return 0, fmt.Errorf("timed out waiting for listener to start on %s", p.ListenAddr)
+		case <-ticker.C:
+			p.listenerMu.Lock()
+			listener := p.listener
+			p.listenerMu.Unlock()
+			if listener != nil {
+				return uint32(listener.Addr().(*net.TCPAddr).Port), nil
+			}
+		}
 	}
 }
 
@@ -43,7 +65,17 @@ func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", p.ListenAddr, err)
 	}
-	p.listener = listener // Store the listener
+
+	p.listenerMu.Lock()
+	p.listener = listener
+	p.listenerMu.Unlock()
+
+	defer func() {
+		p.listenerMu.Lock()
+		p.listener.Close()
+		p.listener = nil
+		p.listenerMu.Unlock()
+	}()
 
 	go func() {
 		<-ctx.Done()
@@ -52,22 +84,35 @@ func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 	}()
 
 	for {
-		conn, err := p.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
+			// Check if the context was cancelled, which would cause Accept to fail.
 			select {
 			case <-ctx.Done():
-				return nil
+				return nil // Graceful shutdown.
 			default:
 				logrus.WithFields(logrus.Fields{
 					logrus.ErrorKey: err,
 					"listen_addr":   p.ListenAddr,
 				}).Error("Failed to accept connection")
+				// If the listener is closed, we should stop.
+				if !isTemporary(err) {
+					return err
+				}
 				continue
 			}
 		}
 		go p.handleConnectionMultiplex(conn)
 	}
 }
+
+func isTemporary(err error) bool {
+	if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+		return true
+	}
+	return false
+}
+
 
 // handleConnectionMultiplex sniffs the protocol and delegates to the appropriate handler.
 func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
@@ -162,26 +207,18 @@ func (p *SNIProxy) proxyToSSHChannel(conn net.Conn, domain string) {
 	sshConn, ok := p.Manager.LoadClient(domain)
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain not found")
-		if req, ok := conn.(*prefixedConn); ok {
-			// Attempt to send an HTTP error if it's an HTTP request
-			resp := &http.Response{
-				StatusCode: http.StatusBadGateway,
-				ProtoMajor: 1,
-				ProtoMinor: 1,
-				Body:       io.NopCloser(strings.NewReader("Tunnel not available")),
-			}
-			resp.Write(req)
-		}
 		return
 	}
 
-	// Prepare the payload for the forwarded-tcpip channel.
-	// This tells the client where the original connection came from.
+	// Get the port that was confirmed to the client for this domain.
+	boundPort, ok := p.Manager.LoadUserBindingPort(domain)
+	if !ok {
+		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Could not find the bound port for the domain. This should not happen.")
+		return
+	}
+
 	originatorIP, originatorPortStr, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	originatorPort, _ := strconv.Atoi(originatorPortStr)
-
-	listenHost, listenPortStr, _ := net.SplitHostPort(p.listener.Addr().String())
-	listenPort, _ := strconv.Atoi(listenPortStr)
 
 	payload := ssh.Marshal(&struct {
 		ConnectedAddr  string
@@ -189,13 +226,12 @@ func (p *SNIProxy) proxyToSSHChannel(conn net.Conn, domain string) {
 		OriginatorIP   string
 		OriginatorPort uint32
 	}{
-		ConnectedAddr:  listenHost,
-		ConnectedPort:  uint32(listenPort),
+		ConnectedAddr:  "0.0.0.0", // The address the client requested to bind to
+		ConnectedPort:  boundPort, // The port the server *confirmed* to the client
 		OriginatorIP:   originatorIP,
 		OriginatorPort: uint32(originatorPort),
 	})
 
-	// Open a forwarded-tcpip channel to the client.
 	channel, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to open 'forwarded-tcpip' SSH channel")
