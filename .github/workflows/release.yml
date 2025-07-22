@@ -1,0 +1,63 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [ released,prereleased ]
+
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        goos: [ windows,  linux, darwin ]
+        goarch: [ amd64, arm64 ]
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - name: Get version
+        id: get_version
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+          echo "${GITHUB_REF}"
+      - name: Checkout
+        uses: actions/checkout@v4.0.0
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v3.8.1
+      - name: Install Dependencies
+        run: npm install --global yarn
+      - name: Setup Go environment
+        uses: actions/setup-go@v4.1.0
+        with:
+          check-latest: true
+      - name: Gen output name
+        run: |
+          echo "FILENAME=zctunnel_${{ matrix.goos }}_${{ matrix.goarch }}" >> ${GITHUB_ENV}
+      - name: Rename Windows File
+        if: matrix.goos == 'windows'
+        run: |
+          echo "FILENAME=zctunnel_${{ matrix.goos }}_${{ matrix.goarch }}.exe" >> ${GITHUB_ENV}
+      - name: FE Build
+        run: cd source-frontend-vite && yarn install && yarn build
+      - name: BE Build
+        run: |
+          go build -o ${{ env.FILENAME }}  cmd/zcdns-server/main.go
+          ls -alh
+      
+      - name: Upload files to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FILENAME }}
+          path: ${{ env.FILENAME }}
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ env.FILENAME }}
+          tag: ${{ github.ref }}
+          file_glob: true
