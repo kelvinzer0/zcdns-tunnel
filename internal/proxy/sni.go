@@ -78,12 +78,11 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	// Set a deadline for peeking to prevent slow clients from holding resources.
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	
-	// Peek at the first byte to determine the protocol.
-	// 0x16 is the TLS Handshake content type.
-	// Anything else is assumed to be HTTP for this proxy's purpose.
-	peeked, err := buffReader.Peek(1)
+	// Peek at the first few bytes to determine the protocol.
+	// We peek up to 8 bytes, which is enough to identify common HTTP methods.
+	peeked, err := buffReader.Peek(8)
 	if err != nil {
-		if err != io.EOF {
+		if err != io.EOF && !strings.Contains(err.Error(), "short read") {
 			logrus.WithField("remote_addr", conn.RemoteAddr()).WithError(err).Debug("Failed to peek connection for protocol sniffing")
 		}
 		return
@@ -92,11 +91,30 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	// Reset the deadline after peeking.
 	conn.SetReadDeadline(time.Time{})
 
+	// --- Protocol Detection Logic ---
+
+	// 1. Check for TLS Handshake (most specific)
 	if peeked[0] == 0x16 {
 		p.handleTLSConnection(conn, buffReader)
-	} else {
-		p.handleHTTPConnection(conn, buffReader)
+		return
 	}
+
+	// 2. Check for valid HTTP Methods (explicit identification)
+	// We convert the peeked bytes to a string for easy comparison.
+	peekedStr := string(peeked)
+	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
+	for _, method := range httpMethods {
+		if strings.HasPrefix(peekedStr, method) {
+			p.handleHTTPConnection(conn, buffReader)
+			return
+		}
+	}
+
+	// 3. If neither, it's an unknown protocol.
+	logrus.WithFields(logrus.Fields{
+		"remote_addr": conn.RemoteAddr(),
+		"peeked_data": string(peeked),
+	}).Warn("Unknown protocol detected. Closing connection.")
 }
 
 // handleTLSConnection handles TLS traffic by extracting the SNI and proxying.
