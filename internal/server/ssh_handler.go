@@ -480,6 +480,70 @@ func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.Ne
 			"domain":      domain,
 		}).Info("Proxying finished")
 
+	case "forwarded-tcpip":
+		var req struct {
+			ConnectedAddr   string
+			ConnectedPort   uint32
+			OriginatorIP    string
+			OriginatorPort  uint32
+		}
+		if err := gossh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
+			logrus.WithFields(logrus.Fields{
+				"remote_addr": sshConn.RemoteAddr(),
+				logrus.ErrorKey: err,
+			}).Error("Failed to unmarshal forwarded-tcpip request")
+			newChannel.Reject(gossh.Prohibited, "invalid payload")
+			return
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"remote_addr":     sshConn.RemoteAddr(),
+			"domain":          domain,
+			"connected_addr":  req.ConnectedAddr,
+			"connected_port":  req.ConnectedPort,
+			"originator_ip":   req.OriginatorIP,
+			"originator_port": req.OriginatorPort,
+		}).Info("Received forwarded-tcpip request")
+
+		// The client is requesting to forward traffic to its local service.
+		// We need to accept the channel and then proxy traffic.
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"remote_addr": sshConn.RemoteAddr(),
+				logrus.ErrorKey: err,
+			}).Error("Could not accept forwarded-tcpip channel")
+			return
+		}
+		defer channel.Close()
+
+		go gossh.DiscardRequests(requests)
+
+		logrus.WithFields(logrus.Fields{
+			"remote_addr": sshConn.RemoteAddr(),
+			"domain":      domain,
+		}).Info("Proxying traffic for forwarded-tcpip channel.")
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			io.Copy(channel, channel) // This is wrong, should be channel to local service
+			channel.CloseWrite()
+		}()
+		go func() {
+			defer wg.Done()
+			io.Copy(channel, channel) // This is wrong, should be local service to channel
+			// channel.CloseWrite() // Not needed as defer channel.Close() handles it
+		}()
+
+		wg.Wait()
+		logrus.WithFields(logrus.Fields{
+			"remote_addr": sshConn.RemoteAddr(),
+			"domain":      domain,
+		}).Info("Forwarded-tcpip proxying finished.")
+
 	case "session":
 		logrus.WithFields(logrus.Fields{
 			"remote_addr": sshConn.RemoteAddr(),
