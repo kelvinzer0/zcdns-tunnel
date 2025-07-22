@@ -1,0 +1,29 @@
+package config
+
+import (
+	"github.com/spf13/viper"
+)
+
+// ServerConfig holds all the configuration for the server
+type ServerConfig struct {
+	SshListenAddr    string `mapstructure:"ssh_listen_addr"`
+	SshHostKeyPath   string `mapstructure:"ssh_host_key_path"`
+	ValidationDomain string `mapstructure:"validation_domain"`
+}
+
+// LoadServerConfig loads the server configuration from a file
+func LoadServerConfig(path string) (ServerConfig, error) {
+	viper.SetConfigFile(path)
+	viper.AutomaticEnv()
+
+	var config ServerConfig
+	if err := viper.ReadInConfig(); err != nil {
+		return config, err
+	}
+
+	if err := viper.Unmarshal(&config); err != nil {
+		return config, err
+	}
+
+	return config, nil
+}

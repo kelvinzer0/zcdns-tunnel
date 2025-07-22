@@ -1,0 +1,8 @@
+# Listening address for the SSH server
+ssh_listen_addr: ":2222"
+
+# Path to the SSH host key
+ssh_host_key_path: "ssh/host_key"
+
+# Domain for CNAME validation
+validation_domain: "server.tunnellku.net"
