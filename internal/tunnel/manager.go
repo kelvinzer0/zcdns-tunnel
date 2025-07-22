@@ -95,13 +95,14 @@ func (m *Manager) LoadAndDeleteRemoteListener(addr string) (*RemoteForwardedPort
 func (m *Manager) StoreDomainForwardedPort(domain string, port uint32) {
 	m.domainForwardedPorts.Store(domain, port)
 	logrus.WithFields(logrus.Fields{
-		"domain": domain,
-		"port":   port,
-	}).Info("Stored domain forwarded port.")
+		"domain_stored": domain,
+		"port_stored":   port,
+	}).Info("Manager: Storing domain forwarded port.")
 }
 
 // LoadDomainForwardedPort loads the actual bound port for a domain.
 func (m *Manager) LoadDomainForwardedPort(domain string) (uint32, bool) {
+	logrus.WithFields(logrus.Fields{"domain_looked_up": domain}).Info("Manager: Loading domain forwarded port.")
 	if port, ok := m.domainForwardedPorts.Load(domain); ok {
 		if p, ok := port.(uint32); ok {
 			return p, true

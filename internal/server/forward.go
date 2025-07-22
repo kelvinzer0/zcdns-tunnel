@@ -89,7 +89,7 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 					continue
 				}
 			} else {
-				actualPort = payload.BindPort
+				actualPort = uint32(listener.Addr().(*net.TCPAddr).Port)
 			}
 
 			if err = s.Manager.StoreRemoteListener(listener.Addr().String(), listener, sshConn); err != nil {
@@ -109,6 +109,7 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				"remote_addr":    sshConn.RemoteAddr(),
 				"bind_addr_port": listener.Addr().String(),
 				"actual_port":    actualPort,
+				"domain_for_store": domain,
 			}).Info("Successfully opened remote forwarded port.")
 
 			// Start accepting connections on this new listener
