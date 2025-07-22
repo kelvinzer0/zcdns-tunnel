@@ -5,11 +5,12 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 
 	"github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
 
-	_ "zcdns-tunnel/internal/tunnel"
+	"zcdns-tunnel/internal/tunnel"
 )
 
 // handleGlobalRequests handles global SSH requests like tcpip-forward and cancel-tcpip-forward.
@@ -50,28 +51,35 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 			var listener net.Listener
 			var actualPort uint32
 
-			// If port 80 is requested, try to bind to a random available port
-			if payload.BindPort == 80 {
-				listener, err = net.Listen("tcp", net.JoinHostPort(payload.BindAddr, "0"))
-				if err != nil {
+			// Try to listen on the requested address first
+			listener, err = net.Listen("tcp", requestedAddr)
+			if err != nil {
+				// If the requested address is already in use, try to bind to a random available port
+				if opErr, ok := err.(*net.OpError); ok && opErr.Err != nil && opErr.Err == syscall.EADDRINUSE {
 					logrus.WithFields(logrus.Fields{
 						"remote_addr":    sshConn.RemoteAddr(),
 						"bind_addr_port": requestedAddr,
 						logrus.ErrorKey:  err,
-					}).Error("Failed to listen for remote forwarding on random port")
-					req.Reply(false, nil)
-					continue
-				}
-				actualPort = uint32(listener.Addr().(*net.TCPAddr).Port)
-				logrus.WithFields(logrus.Fields{
-					"remote_addr":    sshConn.RemoteAddr(),
-					"requested_port": payload.BindPort,
-					"actual_port":    actualPort,
-				}).Info("Dynamically allocated port for remote forwarding")
-				s.Manager.StoreDomainForwardedPort(domain, actualPort)
-			} else {
-				listener, err = net.Listen("tcp", requestedAddr)
-				if err != nil {
+					}).Warn("Requested port already in use, trying dynamic allocation.")
+
+					listener, err = net.Listen("tcp", net.JoinHostPort(payload.BindAddr, "0"))
+					if err != nil {
+						logrus.WithFields(logrus.Fields{
+							"remote_addr":    sshConn.RemoteAddr(),
+							"bind_addr_port": requestedAddr,
+							logrus.ErrorKey:  err,
+						}).Error("Failed to listen for remote forwarding on random port")
+						req.Reply(false, nil)
+						continue
+					}
+					actualPort = uint32(listener.Addr().(*net.TCPAddr).Port)
+					logrus.WithFields(logrus.Fields{
+						"remote_addr":    sshConn.RemoteAddr(),
+						"requested_port": payload.BindPort,
+						"actual_port":    actualPort,
+					}).Info("Dynamically allocated port for remote forwarding")
+					s.Manager.StoreDomainForwardedPort(domain, actualPort)
+				} else {
 					logrus.WithFields(logrus.Fields{
 						"remote_addr":    sshConn.RemoteAddr(),
 						"bind_addr_port": requestedAddr,
@@ -80,6 +88,7 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 					req.Reply(false, nil)
 					continue
 				}
+			} else {
 				actualPort = payload.BindPort
 			}
 
