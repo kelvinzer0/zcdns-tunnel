@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"zcdns-tunnel/internal/config"
+	"zcdns-tunnel/internal/proxy"
 	"zcdns-tunnel/internal/server"
 )
 
@@ -39,6 +41,28 @@ func main() {
 	go func() {
 		if err := sshServer.StartSSHServer(ctx); err != nil {
 			logrus.Printf("SSH server exited with error: %v", err)
+		}
+	}()
+
+	// Start HTTP proxy server for shared port 80
+	go func() {
+		httpProxy := proxy.NewHTTPProxy(sshServer.Manager)
+		httpServer := &http.Server{
+			Addr:    ":80",
+			Handler: httpProxy,
+		}
+
+		go func() {
+			<-ctx.Done()
+			logrus.Println("Shutting down HTTP proxy server...")
+			if err := httpServer.Shutdown(context.Background()); err != nil {
+				logrus.Printf("HTTP proxy server shutdown error: %v", err)
+			}
+		}()
+
+		logrus.Printf("Starting HTTP proxy server on :80")
+		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			logrus.Printf("HTTP proxy server exited with error: %v", err)
 		}
 	}()
 
