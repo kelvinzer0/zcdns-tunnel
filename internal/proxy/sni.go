@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,14 +73,8 @@ func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	defer conn.Close()
 
-	// Use a buffered reader to peek at the initial bytes.
 	buffReader := bufio.NewReader(conn)
-	
-	// Set a deadline for peeking to prevent slow clients from holding resources.
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	
-	// Peek at the first few bytes to determine the protocol.
-	// We peek up to 8 bytes, which is enough to identify common HTTP methods.
 	peeked, err := buffReader.Peek(8)
 	if err != nil {
 		if err != io.EOF && !strings.Contains(err.Error(), "short read") {
@@ -87,30 +82,21 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 		}
 		return
 	}
-
-	// Reset the deadline after peeking.
 	conn.SetReadDeadline(time.Time{})
 
-	// --- Protocol Detection Logic ---
-
-	// 1. Check for TLS Handshake (most specific)
 	if peeked[0] == 0x16 {
 		p.handleTLSConnection(conn, buffReader)
 		return
 	}
 
-	// 2. Check for valid HTTP Methods (explicit identification)
-	// We convert the peeked bytes to a string for easy comparison.
-	peekedStr := string(peeked)
 	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
 	for _, method := range httpMethods {
-		if strings.HasPrefix(peekedStr, method) {
+		if strings.HasPrefix(string(peeked), method) {
 			p.handleHTTPConnection(conn, buffReader)
 			return
 		}
 	}
 
-	// 3. If neither, it's an unknown protocol.
 	logrus.WithFields(logrus.Fields{
 		"remote_addr": conn.RemoteAddr(),
 		"peeked_data": string(peeked),
@@ -119,22 +105,16 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 
 // handleTLSConnection handles TLS traffic by extracting the SNI and proxying.
 func (p *SNIProxy) handleTLSConnection(conn net.Conn, buffReader *bufio.Reader) {
-	// We need a connection that can have bytes put back into its buffer.
 	prefixedConn := newPrefixedConn(conn, buffReader)
 
 	var sniHost string
-	// Use the standard library to parse the ClientHello and get the SNI.
-	// This is much more robust than a manual parser.
 	err := tls.Server(prefixedConn, &tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			sniHost = hello.ServerName
-			// We return an error to stop the handshake after getting the SNI.
-			// We don't want to actually terminate TLS here, just get the name.
 			return nil, fmt.Errorf("just-a-trick-to-get-sni")
 		},
 	}).Handshake()
 
-	// We expect the "just-a-trick-to-get-sni" error. Any other error is a problem.
 	if err != nil && !strings.Contains(err.Error(), "just-a-trick-to-get-sni") {
 		logrus.WithField("remote_addr", conn.RemoteAddr()).WithError(err).Warn("Failed to extract SNI from TLS handshake")
 		return
@@ -146,49 +126,17 @@ func (p *SNIProxy) handleTLSConnection(conn net.Conn, buffReader *bufio.Reader) 
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"remote_addr": conn.RemoteAddr(),
+		"remote_addr":  conn.RemoteAddr(),
 		"sni_hostname": sniHost,
 	}).Info("Extracted SNI hostname")
 
-	// Now that we have the SNI, find the corresponding SSH client.
-	sshConn, ok := p.Manager.LoadClient(sniHost)
-	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": sniHost}).Error("Tunnel for SNI domain not found")
-		return
-	}
-
-	// Open a direct-tcpip channel back to the SSH client.
-	// The destination host/port are placeholders as the client knows where to forward.
-	channel, reqs, err := sshConn.OpenChannel("direct-tcpip", ssh.Marshal(&struct{
-		HostToConnect  string
-		PortToConnect  uint32
-		OriginatorIP   string
-		OriginatorPort uint32
-	}{
-		HostToConnect:  "localhost", // Placeholder
-		PortToConnect:  0,           // Placeholder
-		OriginatorIP:   conn.RemoteAddr().(*net.TCPAddr).IP.String(),
-		OriginatorPort: uint32(conn.RemoteAddr().(*net.TCPAddr).Port),
-	}))
-	if err != nil {
-		logrus.WithFields(logrus.Fields{"domain": sniHost}).WithError(err).Error("Failed to open SSH channel for SNI proxy")
-		return
-	}
-	defer channel.Close()
-	go ssh.DiscardRequests(reqs)
-
-	logrus.WithFields(logrus.Fields{
-		"remote_addr":  conn.RemoteAddr(),
-		"sni_hostname": sniHost,
-	}).Info("Proxying TLS connection")
-
-	// Proxy data between the incoming connection and the SSH channel.
-	proxyData(prefixedConn, channel)
+	p.proxyToSSHChannel(prefixedConn, sniHost)
 }
 
-// handleHTTPConnection handles plain HTTP traffic by using a reverse proxy.
+// handleHTTPConnection handles plain HTTP traffic by proxying.
 func (p *SNIProxy) handleHTTPConnection(conn net.Conn, buffReader *bufio.Reader) {
-	// Read the HTTP request from the buffered reader.
+	prefixedConn := newPrefixedConn(conn, buffReader)
+
 	req, err := http.ReadRequest(buffReader)
 	if err != nil {
 		logrus.WithField("remote_addr", conn.RemoteAddr()).WithError(err).Warn("Failed to read HTTP request")
@@ -200,36 +148,57 @@ func (p *SNIProxy) handleHTTPConnection(conn net.Conn, buffReader *bufio.Reader)
 		domain = strings.Split(domain, ":")[0]
 	}
 
-	// Find the SSH client for this domain.
+	logrus.WithFields(logrus.Fields{
+		"domain":      domain,
+		"source_ip":   conn.RemoteAddr(),
+		"request_uri": req.RequestURI,
+	}).Info("Identified HTTP request")
+
+	p.proxyToSSHChannel(prefixedConn, domain)
+}
+
+// proxyToSSHChannel finds the correct SSH client for a domain and proxies the connection.
+func (p *SNIProxy) proxyToSSHChannel(conn net.Conn, domain string) {
 	sshConn, ok := p.Manager.LoadClient(domain)
 	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for HTTP domain not found")
-		// Send a proper HTTP error response.
-		resp := &http.Response{
-			StatusCode: http.StatusBadGateway,
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Body:       io.NopCloser(strings.NewReader("Tunnel not available")),
+		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain not found")
+		if req, ok := conn.(*prefixedConn); ok {
+			// Attempt to send an HTTP error if it's an HTTP request
+			resp := &http.Response{
+				StatusCode: http.StatusBadGateway,
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Body:       io.NopCloser(strings.NewReader("Tunnel not available")),
+			}
+			resp.Write(req)
 		}
-		resp.Write(conn)
 		return
 	}
 
-	// The reverse proxy will be handled by the SSH client, which forwards to its local service.
-	// We just need to stream the request over the channel.
-	channel, reqs, err := sshConn.OpenChannel("direct-tcpip", ssh.Marshal(&struct{
-		HostToConnect  string
-		PortToConnect  uint32
+	// Prepare the payload for the forwarded-tcpip channel.
+	// This tells the client where the original connection came from.
+	originatorIP, originatorPortStr, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	originatorPort, _ := strconv.Atoi(originatorPortStr)
+
+	listenHost, listenPortStr, _ := net.SplitHostPort(p.listener.Addr().String())
+	listenPort, _ := strconv.Atoi(listenPortStr)
+
+	payload := ssh.Marshal(&struct {
+		ConnectedAddr  string
+		ConnectedPort  uint32
 		OriginatorIP   string
 		OriginatorPort uint32
 	}{
-		HostToConnect:  "localhost", // Placeholder
-		PortToConnect:  80,          // Placeholder, can indicate HTTP
-		OriginatorIP:   conn.RemoteAddr().(*net.TCPAddr).IP.String(),
-		OriginatorPort: uint32(conn.RemoteAddr().(*net.TCPAddr).Port),
-	}))
+		ConnectedAddr:  listenHost,
+		ConnectedPort:  uint32(listenPort),
+		OriginatorIP:   originatorIP,
+		OriginatorPort: uint32(originatorPort),
+	})
+
+	// Open a forwarded-tcpip channel to the client.
+	channel, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to open SSH channel for HTTP proxy")
+		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to open 'forwarded-tcpip' SSH channel")
 		return
 	}
 	defer channel.Close()
@@ -237,19 +206,10 @@ func (p *SNIProxy) handleHTTPConnection(conn net.Conn, buffReader *bufio.Reader)
 
 	logrus.WithFields(logrus.Fields{
 		"domain":      domain,
-		"source_ip":   conn.RemoteAddr(),
-		"request_uri": req.RequestURI,
-	}).Info("Forwarding HTTP request")
+		"remote_addr": conn.RemoteAddr(),
+	}).Info("Proxying traffic to SSH channel")
 
-	// Write the original request to the SSH channel.
-	err = req.Write(channel)
-	if err != nil {
-		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to write HTTP request to SSH channel")
-		return
-	}
-
-	// Copy the response from the SSH channel back to the client.
-	io.Copy(conn, channel)
+	proxyData(conn, channel)
 }
 
 // proxyData copies data between two connections and logs the process.
@@ -273,8 +233,7 @@ func proxyData(client, target io.ReadWriteCloser) {
 }
 
 // prefixedConn is a helper struct that allows us to "put back" bytes
-// that were peeked from a connection, so the next reader (like a TLS handshake
-// or an HTTP parser) gets the full, original stream.
+// that were peeked from a connection.
 type prefixedConn struct {
 	net.Conn
 	r *bufio.Reader
