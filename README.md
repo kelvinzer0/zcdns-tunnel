@@ -22,9 +22,9 @@ This project provides a stateless, dynamic SSH port forwarding solution that all
         ```
         (Traffic from internet to `your-server.com:80` goes to `localhost:80` on your local machine)
 
-    *   **Remote Forwarding (`-R`):** Open a port on the server that forwards to your local service.
+    *   **Remote Forwarding (`-R`):** Open a port on the server that forwards to your local service. To make it accessible from the internet, bind to `0.0.0.0`.
         ```bash
-        ssh your-domain.com@your-server.com -p 2222 -R 80:localhost:80
+        ssh your-domain.com@your-server.com -p 2222 -R 0.0.0.0:80:localhost:80
         ```
         (Traffic from `your-server.com:80` goes to `localhost:80` on your local machine)
 
