@@ -27,10 +27,6 @@ jobs:
           echo "${GITHUB_REF}"
       - name: Checkout
         uses: actions/checkout@v4.0.0
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v3.8.1
-      - name: Install Dependencies
-        run: npm install --global yarn
       - name: Setup Go environment
         uses: actions/setup-go@v4.1.0
         with:
@@ -42,8 +38,6 @@ jobs:
         if: matrix.goos == 'windows'
         run: |
           echo "FILENAME=zctunnel_${{ matrix.goos }}_${{ matrix.goarch }}.exe" >> ${GITHUB_ENV}
-      - name: FE Build
-        run: cd source-frontend-vite && yarn install && yarn build
       - name: BE Build
         run: |
           go build -o ${{ env.FILENAME }}  cmd/zcdns-server/main.go
