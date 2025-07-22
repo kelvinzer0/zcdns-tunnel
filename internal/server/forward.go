@@ -40,6 +40,16 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				continue
 			}
 
+			// Security enhancement: For HTTP proxy tunnels, bind to localhost if 0.0.0.0 is requested.
+			isHTTPProxyStr, isHTTPProxyOk := sshConn.Permissions.Extensions["is_http_proxy"]
+			if isHTTPProxyOk && isHTTPProxyStr == "true" && (payload.BindAddr == "0.0.0.0" || payload.BindAddr == "") {
+				logrus.WithFields(logrus.Fields{
+					"remote_addr": sshConn.RemoteAddr(),
+					"original_bind_addr": payload.BindAddr,
+				}).Info("HTTP proxy tunnel: Changing bind address from 0.0.0.0 to 127.0.0.1 for security.")
+				payload.BindAddr = "127.0.0.1"
+			}
+
 			requestedAddr := net.JoinHostPort(payload.BindAddr, fmt.Sprintf("%d", payload.BindPort))
 			logrus.WithFields(logrus.Fields{
 				"remote_addr":    sshConn.RemoteAddr(),

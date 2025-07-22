@@ -69,6 +69,9 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 
 	// Also remove the domain-to-port mapping
 	m.domainForwardedPorts.Delete(domain)
+
+	// Also remove the HTTP request status
+	m.httpRequests.Delete(domain)
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
