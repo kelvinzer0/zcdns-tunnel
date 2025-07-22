@@ -78,7 +78,7 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 						"requested_port": payload.BindPort,
 						"actual_port":    actualPort,
 					}).Info("Dynamically allocated port for remote forwarding")
-					s.Manager.StoreDomainForwardedPort(domain, actualPort)
+					s.Manager.StoreUserBindingPort(domain, actualPort)
 				} else {
 					logrus.WithFields(logrus.Fields{
 						"remote_addr":    sshConn.RemoteAddr(),
@@ -103,12 +103,14 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				continue
 			}
 
+			s.Manager.StoreUserBindingPort(domain, actualPort) // THIS LINE WAS MISSING!
+
 			// Reply to the client with the actual bound port
 			req.Reply(true, gossh.Marshal(&struct{ Port uint32 }{Port: actualPort}))
 			logrus.WithFields(logrus.Fields{
-				"remote_addr":    sshConn.RemoteAddr(),
-				"bind_addr_port": listener.Addr().String(),
-				"actual_port":    actualPort,
+				"remote_addr":          sshConn.RemoteAddr(),
+				"bind_addr_port":       listener.Addr().String(),
+				"actual_port":          actualPort,
 				"domain_for_store_raw": fmt.Sprintf("%q", domain),
 			}).Info("Successfully opened remote forwarded port.")
 

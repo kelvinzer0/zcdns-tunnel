@@ -91,39 +91,39 @@ func (m *Manager) LoadAndDeleteRemoteListener(addr string) (*RemoteForwardedPort
 	return nil, false
 }
 
-// StoreDomainForwardedPort stores the actual bound port for a domain.
-func (m *Manager) StoreDomainForwardedPort(domain string, port uint32) {
+// StoreUserBindingPort stores the actual bound port for a domain.
+func (m *Manager) StoreUserBindingPort(domain string, port uint32) {
 	m.domainForwardedPorts.Store(domain, port)
 	logrus.WithFields(logrus.Fields{
 		"domain_stored_raw": fmt.Sprintf("%q", domain),
 		"port_stored":       port,
-	}).Info("Manager: Storing domain forwarded port.")
+	}).Info("Manager: Storing user binding port.")
 
 	// NEW LOG: Verify immediately after store
 	if val, ok := m.domainForwardedPorts.Load(domain); ok {
 		logrus.WithFields(logrus.Fields{
 			"domain_verified_raw": fmt.Sprintf("%q", domain),
 			"verified_value":      val,
-		}).Info("Manager: Successfully verified stored domain forwarded port immediately after store.")
+		}).Info("Manager: Successfully verified stored user binding port immediately after store.")
 	} else {
 		logrus.WithFields(logrus.Fields{
 			"domain_verified_raw": fmt.Sprintf("%q", domain),
-		}).Error("Manager: Failed to verify stored domain forwarded port immediately after store. THIS IS A CRITICAL ERROR.")
+		}).Error("Manager: Failed to verify stored user binding port immediately after store. THIS IS A CRITICAL ERROR.")
 	}
 }
 
-// LoadDomainForwardedPort loads the actual bound port for a domain.
-func (m *Manager) LoadDomainForwardedPort(domain string) (uint32, bool) {
-	logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain)}).Info("Manager: Loading domain forwarded port.")
+// LoadUserBindingPort loads the actual bound port for a domain.
+func (m *Manager) LoadUserBindingPort(domain string) (uint32, bool) {
+	logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain)}).Info("Manager: Loading user binding port.")
 	val, ok := m.domainForwardedPorts.Load(domain)
 	if !ok {
-		logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain)}).Warn("Manager: Domain not found in map during load.")
+		logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain)}).Warn("Manager: Domain not found in map during user binding port load.")
 		return 0, false
 	}
 	if p, ok := val.(uint32); ok {
 		return p, true
 	}
-	logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain), "value_type": fmt.Sprintf("%T", val)}).Warn("Manager: Stored value is not uint32.")
+	logrus.WithFields(logrus.Fields{"domain_looked_up_raw": fmt.Sprintf("%q", domain), "value_type": fmt.Sprintf("%T", val)}).Warn("Manager: Stored value for user binding port is not uint32.")
 	return 0, false
 }
 

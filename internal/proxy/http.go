@@ -37,8 +37,8 @@ func (p *HTTPProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find the dynamically allocated port for this domain's tunnel
-	logrus.WithFields(logrus.Fields{"domain_to_lookup_raw": fmt.Sprintf("%q", domain)}).Info("Attempting to load domain forwarded port")
-	port, ok := p.manager.LoadDomainForwardedPort(domain)
+	logrus.WithFields(logrus.Fields{"domain_to_lookup_raw": fmt.Sprintf("%q", domain)}).Info("Attempting to load user binding port")
+	port, ok := p.manager.LoadUserBindingPort(domain)
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain is down or not found")
 		http.Error(w, "Tunnel not available", http.StatusBadGateway)
