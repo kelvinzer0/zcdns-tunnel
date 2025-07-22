@@ -8,18 +8,29 @@ import (
 
 	"github.com/sirupsen/logrus"
 	gossh "golang.org/x/crypto/ssh"
+
+	_ "zcdns-tunnel/internal/tunnel"
 )
 
 // handleGlobalRequests handles global SSH requests like tcpip-forward and cancel-tcpip-forward.
 func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan *gossh.Request) {
+	domain, ok := sshConn.Permissions.Extensions["domain"]
+	if !ok || domain == "" {
+		logrus.WithFields(logrus.Fields{
+			"remote_addr": sshConn.RemoteAddr(),
+		}).Error("No domain found in SSH connection permissions for global request")
+		return
+	}
+
 	for req := range reqs {
+		var err error // Declare err once at the beginning of the loop
 		switch req.Type {
 		case "tcpip-forward":
 			var payload struct {
 				BindAddr string
 				BindPort uint32
 			}
-			if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+			if err = gossh.Unmarshal(req.Payload, &payload); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"remote_addr":   sshConn.RemoteAddr(),
 					logrus.ErrorKey: err,
@@ -28,28 +39,54 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				continue
 			}
 
-			addr := net.JoinHostPort(payload.BindAddr, fmt.Sprintf("%d", payload.BindPort))
+			requestedAddr := net.JoinHostPort(payload.BindAddr, fmt.Sprintf("%d", payload.BindPort))
 			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"bind_addr":   payload.BindAddr,
-				"bind_port":   payload.BindPort,
+				"remote_addr":    sshConn.RemoteAddr(),
+				"bind_addr":      payload.BindAddr,
+				"bind_port":      payload.BindPort,
+				"requested_addr": requestedAddr,
 			}).Info("Received tcpip-forward request")
 
-			listener, err := net.Listen("tcp", addr)
-			if err != nil {
+			var listener net.Listener
+			var actualPort uint32
+
+			// If port 80 is requested, try to bind to a random available port
+			if payload.BindPort == 80 {
+				listener, err = net.Listen("tcp", net.JoinHostPort(payload.BindAddr, "0"))
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"remote_addr":    sshConn.RemoteAddr(),
+						"bind_addr_port": requestedAddr,
+						logrus.ErrorKey:  err,
+					}).Error("Failed to listen for remote forwarding on random port")
+					req.Reply(false, nil)
+					continue
+				}
+				actualPort = uint32(listener.Addr().(*net.TCPAddr).Port)
 				logrus.WithFields(logrus.Fields{
 					"remote_addr":    sshConn.RemoteAddr(),
-					"bind_addr_port": addr,
-					logrus.ErrorKey:  err,
-				}).Error("Failed to listen for remote forwarding")
-				req.Reply(false, nil)
-				continue
+					"requested_port": payload.BindPort,
+					"actual_port":    actualPort,
+				}).Info("Dynamically allocated port for remote forwarding")
+				s.Manager.StoreDomainForwardedPort(domain, actualPort)
+			} else {
+				listener, err = net.Listen("tcp", requestedAddr)
+				if err != nil {
+					logrus.WithFields(logrus.Fields{
+						"remote_addr":    sshConn.RemoteAddr(),
+						"bind_addr_port": requestedAddr,
+						logrus.ErrorKey:  err,
+					}).Error("Failed to listen for remote forwarding")
+					req.Reply(false, nil)
+					continue
+				}
+				actualPort = payload.BindPort
 			}
 
-			if err := s.Manager.StoreRemoteListener(addr, listener, sshConn); err != nil {
+			if err = s.Manager.StoreRemoteListener(listener.Addr().String(), listener, sshConn); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"remote_addr":    sshConn.RemoteAddr(),
-					"bind_addr_port": addr,
+					"bind_addr_port": listener.Addr().String(),
 					logrus.ErrorKey:  err,
 				}).Warn("Port already in use for remote forwarding.")
 				listener.Close() // Close the listener if storing fails
@@ -57,21 +94,23 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				continue
 			}
 
-			req.Reply(true, nil)
+			// Reply to the client with the actual bound port
+			req.Reply(true, gossh.Marshal(&struct{ Port uint32 }{Port: actualPort}))
 			logrus.WithFields(logrus.Fields{
 				"remote_addr":    sshConn.RemoteAddr(),
-				"bind_addr_port": addr,
+				"bind_addr_port": listener.Addr().String(),
+				"actual_port":    actualPort,
 			}).Info("Successfully opened remote forwarded port.")
 
 			// Start accepting connections on this new listener
-			go s.handleRemoteForwardedConnections(sshConn, listener, payload.BindAddr, payload.BindPort)
+			go s.handleRemoteForwardedConnections(sshConn, listener, payload.BindAddr, actualPort)
 
 		case "cancel-tcpip-forward":
 			var payload struct {
 				BindAddr string
 				BindPort uint32
 			}
-			if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+			if err = gossh.Unmarshal(req.Payload, &payload); err != nil {
 				logrus.WithFields(logrus.Fields{
 					"remote_addr":   sshConn.RemoteAddr(),
 					logrus.ErrorKey: err,
@@ -100,6 +139,9 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				}).Warn("Remote forwarded port not found for cancellation.")
 				req.Reply(false, nil)
 			}
+
+			// Remove the domain-to-port mapping as well
+			s.Manager.DeleteDomainForwardedPort(domain)
 
 		default:
 			logrus.WithFields(logrus.Fields{

@@ -17,6 +17,9 @@ type Manager struct {
 
 	// remoteListeners maps "bind_addr:bind_port" to RemoteForwardedPort
 	remoteListeners sync.Map // map[string]*RemoteForwardedPort
+
+	// domainForwardedPorts maps domain to the actual port bound for remote forwarding
+	domainForwardedPorts sync.Map // map[string]uint32
 }
 
 // NewManager creates a new tunnel manager.
@@ -60,6 +63,9 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 		}
 		return true
 	})
+
+	// Also remove the domain-to-port mapping
+	m.domainForwardedPorts.Delete(domain)
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
@@ -80,6 +86,33 @@ func (m *Manager) LoadAndDeleteRemoteListener(addr string) (*RemoteForwardedPort
 		}
 	}
 	return nil, false
+}
+
+// StoreDomainForwardedPort stores the actual bound port for a domain.
+func (m *Manager) StoreDomainForwardedPort(domain string, port uint32) {
+	m.domainForwardedPorts.Store(domain, port)
+	logrus.WithFields(logrus.Fields{
+		"domain": domain,
+		"port":   port,
+	}).Info("Stored domain forwarded port.")
+}
+
+// LoadDomainForwardedPort loads the actual bound port for a domain.
+func (m *Manager) LoadDomainForwardedPort(domain string) (uint32, bool) {
+	if port, ok := m.domainForwardedPorts.Load(domain); ok {
+		if p, ok := port.(uint32); ok {
+			return p, true
+		}
+	}
+	return 0, false
+}
+
+// DeleteDomainForwardedPort deletes the domain-to-port mapping.
+func (m *Manager) DeleteDomainForwardedPort(domain string) {
+	m.domainForwardedPorts.Delete(domain)
+	logrus.WithFields(logrus.Fields{
+		"domain": domain,
+	}).Info("Removed domain forwarded port.")
 }
 
 // RemoteForwardedPort represents a port opened for remote forwarding on the server.
