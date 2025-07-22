@@ -109,7 +109,7 @@ func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan 
 				"remote_addr":    sshConn.RemoteAddr(),
 				"bind_addr_port": listener.Addr().String(),
 				"actual_port":    actualPort,
-				"domain_for_store": domain,
+				"domain_for_store_raw": fmt.Sprintf("%q", domain),
 			}).Info("Successfully opened remote forwarded port.")
 
 			// Start accepting connections on this new listener
