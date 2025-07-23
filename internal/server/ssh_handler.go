@@ -231,7 +231,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		actualIntermediaryAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(intermedPort)))
 
 		// 3. Store the mapping from the client's domain to this new intermediary address.
-		s.Manager.StoreBridgeAddress(domain, actualIntermediaryAddr)
+						s.Manager.StoreBridgeAddress(domain, payload.BindPort, actualIntermediaryAddr)
 
 		// 4. Ensure the main public SNIProxy listener exists.
 		sniProxy, exists := s.sniListeners[publicListenAddr]
@@ -275,7 +275,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 			s.sniListenerRefCounts[publicListenAddr]--
 			intermedCancel()
 			delete(s.tcpListeners, actualIntermediaryAddr)
-			s.Manager.DeleteBridgeAddress(domain)
+							s.Manager.DeleteBridgeAddress(domain, payload.BindPort)
 			req.Reply(false, nil)
 			return
 		}

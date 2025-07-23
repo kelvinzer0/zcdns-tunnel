@@ -21,8 +21,14 @@ type Manager struct {
 	// domainForwardedPorts maps domain to the actual port bound for remote forwarding
 	domainForwardedPorts sync.Map // map[string]uint32
 
-	// domainBridgeAddrs maps a domain to its internal TCP bridge address (e.g., 127.0.0.1:12345)
-	domainBridgeAddrs sync.Map // map[string]string
+	// domainBridgeAddrs maps domain to its domainPortBridges.
+	domainBridgeAddrs sync.Map // map[string]*domainPortBridges
+}
+
+// domainPortBridges holds a map of public ports to their internal bridge addresses.
+type domainPortBridges struct {
+	mu      sync.RWMutex
+	bridges map[uint32]string
 }
 
 // NewManager creates a new tunnel manager.
@@ -71,7 +77,17 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 	m.domainForwardedPorts.Delete(domain)
 
 	// And the domain-to-bridge mapping
-	m.DeleteBridgeAddress(domain)
+	// We need to iterate and delete all bridges for this domain
+	if v, ok := m.domainBridgeAddrs.Load(domain); ok {
+		dpb := v.(*domainPortBridges)
+		dpb.mu.Lock()
+		for port := range dpb.bridges {
+			delete(dpb.bridges, port)
+		}
+		dpb.mu.Unlock()
+		m.domainBridgeAddrs.Delete(domain)
+		logrus.WithField("domain", domain).Info("Removed all bridge addresses for domain on SSH connection close.")
+	}
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
@@ -138,30 +154,53 @@ func (m *Manager) DeleteDomainForwardedPort(domain string) {
 	}).Info("Removed domain forwarded port.")
 }
 
-// StoreBridgeAddress stores the internal bridge address for a domain.
-func (m *Manager) StoreBridgeAddress(domain, addr string) {
-	m.domainBridgeAddrs.Store(domain, addr)
+// StoreBridgeAddress stores the internal bridge address for a domain and public port.
+func (m *Manager) StoreBridgeAddress(domain string, publicPort uint32, addr string) {
+	v, _ := m.domainBridgeAddrs.LoadOrStore(domain, &domainPortBridges{bridges: make(map[uint32]string)})
+	dpb := v.(*domainPortBridges)
+	dpb.mu.Lock()
+	defer dpb.mu.Unlock()
+	dpb.bridges[publicPort] = addr
 	logrus.WithFields(logrus.Fields{
-		"domain": domain,
+		"domain":      domain,
+		"public_port": publicPort,
 		"bridge_addr": addr,
-	}).Info("Stored bridge address for domain.")
+	}).Info("Stored bridge address for domain and port.")
 }
 
-// LoadBridgeAddress loads the internal bridge address for a domain.
-func (m *Manager) LoadBridgeAddress(domain string) (string, bool) {
-	addr, ok := m.domainBridgeAddrs.Load(domain)
+// LoadBridgeAddress loads the internal bridge address for a domain and public port.
+func (m *Manager) LoadBridgeAddress(domain string, publicPort uint32) (string, bool) {
+	v, ok := m.domainBridgeAddrs.Load(domain)
 	if !ok {
 		return "", false
 	}
-	return addr.(string), true
+	dpb := v.(*domainPortBridges)
+	dpb.mu.RLock()
+	defer dpb.mu.RUnlock()
+	addr, ok := dpb.bridges[publicPort]
+	return addr, ok
 }
 
-// DeleteBridgeAddress deletes the internal bridge address for a domain.
-func (m *Manager) DeleteBridgeAddress(domain string) {
-	m.domainBridgeAddrs.Delete(domain)
+// DeleteBridgeAddress deletes the internal bridge address for a domain and public port.
+func (m *Manager) DeleteBridgeAddress(domain string, publicPort uint32) {
+	v, ok := m.domainBridgeAddrs.Load(domain)
+	if !ok {
+		return
+	}
+	dpb := v.(*domainPortBridges)
+	dpb.mu.Lock()
+	defer dpb.mu.Unlock()
+	delete(dpb.bridges, publicPort)
 	logrus.WithFields(logrus.Fields{
-		"domain": domain,
-	}).Info("Removed bridge address for domain.")
+		"domain":      domain,
+		"public_port": publicPort,
+	}).Info("Removed bridge address for domain and port.")
+
+	// If no more bridges for this domain, remove the domain entry itself
+	if len(dpb.bridges) == 0 {
+		m.domainBridgeAddrs.Delete(domain)
+		logrus.WithField("domain", domain).Info("Removed all bridge addresses for domain.")
+	}
 }
 
 // RemoteForwardedPort represents a port opened for remote forwarding on the server.

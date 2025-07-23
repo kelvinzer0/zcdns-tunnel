@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -397,7 +397,13 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 		"proxy_type":   "SNI",
 	}).Info("Extracted SNI hostname")
 
-	bridgeAddr, ok := p.Manager.LoadBridgeAddress(sniHost)
+	publicPort, err := strconv.ParseUint(strings.Split(p.ListenAddr, ":")[1], 10, 32)
+	if err != nil {
+		logrus.WithField("listen_addr", p.ListenAddr).WithError(err).Error("Failed to parse listen address port")
+		return
+	}
+
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(sniHost, uint32(publicPort))
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": sniHost}).Error("Bridge for domain not found")
 		return
@@ -441,7 +447,13 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 		"proxy_type":  "HTTP",
 	}).Info("Identified HTTP request")
 
-	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain)
+	publicPort, err := strconv.ParseUint(strings.Split(p.ListenAddr, ":")[1], 10, 32)
+	if err != nil {
+		logrus.WithField("listen_addr", p.ListenAddr).WithError(err).Error("Failed to parse listen address port")
+		return
+	}
+
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain, uint32(publicPort))
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Bridge for domain not found during HTTP routing")
 		// Optional: could write a 404 response to the client here
