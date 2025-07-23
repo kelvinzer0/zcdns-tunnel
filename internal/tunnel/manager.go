@@ -20,6 +20,9 @@ type Manager struct {
 
 	// domainForwardedPorts maps domain to the actual port bound for remote forwarding
 	domainForwardedPorts sync.Map // map[string]uint32
+
+	// domainBridgeAddrs maps a domain to its internal TCP bridge address (e.g., 127.0.0.1:12345)
+	domainBridgeAddrs sync.Map // map[string]string
 }
 
 // NewManager creates a new tunnel manager.
@@ -66,6 +69,9 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 
 	// Also remove the domain-to-port mapping
 	m.domainForwardedPorts.Delete(domain)
+
+	// And the domain-to-bridge mapping
+	m.DeleteBridgeAddress(domain)
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
@@ -130,6 +136,32 @@ func (m *Manager) DeleteDomainForwardedPort(domain string) {
 	logrus.WithFields(logrus.Fields{
 		"domain": domain,
 	}).Info("Removed domain forwarded port.")
+}
+
+// StoreBridgeAddress stores the internal bridge address for a domain.
+func (m *Manager) StoreBridgeAddress(domain, addr string) {
+	m.domainBridgeAddrs.Store(domain, addr)
+	logrus.WithFields(logrus.Fields{
+		"domain": domain,
+		"bridge_addr": addr,
+	}).Info("Stored bridge address for domain.")
+}
+
+// LoadBridgeAddress loads the internal bridge address for a domain.
+func (m *Manager) LoadBridgeAddress(domain string) (string, bool) {
+	addr, ok := m.domainBridgeAddrs.Load(domain)
+	if !ok {
+		return "", false
+	}
+	return addr.(string), true
+}
+
+// DeleteBridgeAddress deletes the internal bridge address for a domain.
+func (m *Manager) DeleteBridgeAddress(domain string) {
+	m.domainBridgeAddrs.Delete(domain)
+	logrus.WithFields(logrus.Fields{
+		"domain": domain,
+	}).Info("Removed bridge address for domain.")
 }
 
 // RemoteForwardedPort represents a port opened for remote forwarding on the server.

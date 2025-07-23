@@ -142,13 +142,8 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerCo
 			delete(s.tcpListeners, fwd.internalListenAddr)
 		}
 
-		// If it was a shared listener, update the SNI proxy
-		if sniProxy, exists := s.sniListeners[publicAddr]; exists {
-			// If this was the client that set the default backend, clear it.
-			if fwd.internalListenAddr != "" {
-				sniProxy.ClearDefaultTCPBackend(fwd.internalListenAddr)
-			}
-
+		// If it was a shared listener, decrement its reference count.
+		if _, exists := s.sniListeners[publicAddr]; exists {
 			s.sniListenerRefCounts[publicAddr]--
 			if s.sniListenerRefCounts[publicAddr] <= 0 {
 				logrus.WithFields(logrus.Fields{
@@ -205,9 +200,40 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// --- SHARED LISTENER (0.0.0.0) LOGIC ---
+		// --- SHARED LISTENER (0.0.0.0) LOGIC ---
 	if payload.BindAddr == "0.0.0.0" {
-		// 1. Ensure the public SNIProxy listener exists
+		// For shared listeners, we create an intermediary TCP proxy for this specific client
+		// to bridge traffic from the main SNI proxy to this client's SSH connection.
+
+		// 1. Create the intermediary TCP proxy on a random port on localhost.
+		intermediaryAddr := "127.0.0.1:0"
+		// This TCPProxy is special: it listens on the intermediary address, but its job is
+		// to forward traffic to the *specific* sshConn that requested it.
+		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, payload.BindPort, sshConn)
+		intermedCtx, intermedCancel := context.WithCancel(ctx)
+
+		go func() {
+			if err := intermediaryProxy.ListenAndServe(intermedCtx); err != nil {
+				if intermedCtx.Err() == nil {
+					logrus.WithError(err).WithField("listen_addr", intermediaryAddr).Warn("Intermediary TCP proxy exited with error")
+				}
+			}
+		}()
+
+		// 2. Get the actual port the intermediary proxy is listening on.
+		intermedPort, err := intermediaryProxy.GetListenPort(5 * time.Second)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to get intermediary listener port")
+			intermedCancel()
+			req.Reply(false, nil)
+			return
+		}
+		actualIntermediaryAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(intermedPort)))
+
+		// 3. Store the mapping from the client's domain to this new intermediary address.
+		s.Manager.StoreBridgeAddress(domain, actualIntermediaryAddr)
+
+		// 4. Ensure the main public SNIProxy listener exists.
 		sniProxy, exists := s.sniListeners[publicListenAddr]
 		if !exists {
 			sniProxy = proxy.NewSNIProxy(s.Manager, publicListenAddr)
@@ -217,63 +243,46 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 			s.sniListenerCancel[publicListenAddr] = sniCancel
 
 			go func() {
+				logrus.WithField("listen_addr", publicListenAddr).Info("Starting new dynamic SNI/HTTP listener")
 				if err := sniProxy.ListenAndServe(sniCtx); err != nil {
-					logrus.WithError(err).WithField("listen_addr", publicListenAddr).Error("SNI proxy exited with error")
+					if sniCtx.Err() == nil {
+						logrus.WithError(err).WithField("listen_addr", publicListenAddr).Error("SNI proxy exited with error")
+					}
 				}
+				logrus.WithField("listen_addr", publicListenAddr).Info("SNI/HTTP listener has shut down.")
 			}()
 		}
 
-		// 2. Check if a default backend is already set.
-		// If not, this client becomes the default TCP handler.
-		if !sniProxy.HasDefaultTCPBackend() {
-			// Create the intermediary TCP proxy on 127.0.0.1:0
-			intermediaryAddr := "127.0.0.1:0"
-			intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, publicListenAddr, sshConn)
-			intermedCtx, intermedCancel := context.WithCancel(ctx)
-
-			go func() {
-				if err := intermediaryProxy.ListenAndServe(intermedCtx); err != nil {
-					logrus.WithError(err).WithField("listen_addr", intermediaryAddr).Warn("Intermediary TCP proxy exited with error")
-				}
-			}()
-
-			intermedPort, err := intermediaryProxy.GetListenPort(5 * time.Second)
-			if err != nil {
-				logrus.WithError(err).Error("Failed to get intermediary listener port")
-				intermedCancel()
-				req.Reply(false, nil)
-				return
-			}
-			actualIntermediaryAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(intermedPort)))
-
-			sniProxy.SetDefaultTCPBackend(actualIntermediaryAddr)
-
-			s.tcpListeners[actualIntermediaryAddr] = intermedCancel
-			activeForwards[publicListenAddr] = &forwarder{
-				internalListenAddr: actualIntermediaryAddr,
-				cancel:             intermedCancel,
-			}
-			logrus.WithField("intermediary_addr", actualIntermediaryAddr).Info("Client set as default TCP handler for shared port")
-		} else {
-			// A default handler already exists. This client will only serve SNI/HTTP traffic.
-			activeForwards[publicListenAddr] = &forwarder{
-				internalListenAddr: "", // Empty string signifies this is NOT the default handler
-				cancel:             func() {},
-			}
-			logrus.Info("Client registered for SNI/HTTP traffic on existing shared port")
+		// 5. Register this forward with the connection's active forwards list.
+		activeForwards[publicListenAddr] = &forwarder{
+			internalListenAddr: actualIntermediaryAddr, // This is the bridge address
+			cancel:             intermedCancel,         // This cancels the bridge proxy
 		}
-
+		s.tcpListeners[actualIntermediaryAddr] = intermedCancel // Track the listener
 		s.sniListenerRefCounts[publicListenAddr]++
 
+		logrus.WithFields(logrus.Fields{
+			"domain":           domain,
+			"public_listen":  publicListenAddr,
+			"bridge_addr":      actualIntermediaryAddr,
+		}).Info("Client registered for shared port via intermediary bridge")
+
+		// 6. Confirm the forward and return the public port to the client.
 		publicPort, err := sniProxy.GetListenPort(5 * time.Second)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to get public SNI listener port")
+			// Cleanup
+			s.sniListenerRefCounts[publicListenAddr]--
+			intermedCancel()
+			delete(s.tcpListeners, actualIntermediaryAddr)
+			s.Manager.DeleteBridgeAddress(domain)
 			req.Reply(false, nil)
 			return
 		}
-		s.Manager.StoreUserBindingPort(domain, publicPort)
+
+		s.Manager.StoreUserBindingPort(domain, payload.BindPort)
 		req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: publicPort}))
-		logrus.WithFields(logrus.Fields{"public_port": publicPort}).Info("Shared forward request acknowledged")
+		logrus.WithFields(logrus.Fields{"public_port": publicPort, "domain": domain}).Info("Shared forward request acknowledged")
 
 		return
 	}
@@ -285,7 +294,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		return
 	}
 
-	tcpProxy := proxy.NewTCPProxy(publicListenAddr, publicListenAddr, sshConn)
+			tcpProxy := proxy.NewTCPProxy(publicListenAddr, payload.BindPort, sshConn)
 	listenerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
@@ -335,11 +344,8 @@ func (s *SSHServer) handleCancelTCPIPForward(req *gossh.Request, activeForwards 
 			delete(s.tcpListeners, fwd.internalListenAddr)
 		}
 
-		// If it was a shared listener, update the SNI proxy
-		if sniProxy, ok := s.sniListeners[publicListenAddr]; ok {
-			if fwd.internalListenAddr != "" {
-				sniProxy.ClearDefaultTCPBackend(fwd.internalListenAddr)
-			}
+		// If it was a shared listener, update its reference count.
+		if _, ok := s.sniListeners[publicListenAddr]; ok {
 			s.sniListenerRefCounts[publicListenAddr]--
 			if s.sniListenerRefCounts[publicListenAddr] <= 0 {
 				s.sniListenerCancel[publicListenAddr]()

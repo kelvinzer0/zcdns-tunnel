@@ -13,20 +13,21 @@ import (
 )
 
 // TCPProxy handles raw TCP packet forwarding for a single SSH connection.
-// It does not perform any protocol sniffing.
+// It is used as the intermediary bridge between the shared SNIProxy and the
+// specific SSH client connection that owns a domain.
 type TCPProxy struct {
-	ListenAddr     string // The address this proxy listens on (e.g., 127.0.0.1:0)
-	PublicAddr     string // The address the client originally requested (e.g., 0.0.0.0:80)
+	ListenAddr     string // The address this proxy listens on (e.g., 127.0.0.1:12345)
+	PublicPort     uint32 // The public port the user originally requested (e.g., 80)
 	sshConn        *ssh.ServerConn
 	listener       net.Listener
 	listenerMu     sync.Mutex
 }
 
 // NewTCPProxy creates a new TCPProxy handler for a specific SSH connection.
-func NewTCPProxy(listenAddr, publicAddr string, sshConn *ssh.ServerConn) *TCPProxy {
+func NewTCPProxy(listenAddr string, publicPort uint32, sshConn *ssh.ServerConn) *TCPProxy {
 	return &TCPProxy{
 		ListenAddr:     listenAddr,
-		PublicAddr:     publicAddr,
+		PublicPort:     publicPort,
 		sshConn:        sshConn,
 	}
 }
@@ -54,7 +55,7 @@ func (p *TCPProxy) GetListenPort(timeout time.Duration) (uint32, error) {
 
 // ListenAndServe starts the raw TCP proxy listener.
 func (p *TCPProxy) ListenAndServe(ctx context.Context) error {
-	logrus.Printf("Starting raw TCP proxy server on %s (for public %s)", p.ListenAddr, p.PublicAddr)
+	logrus.Printf("Starting raw TCP proxy server on %s", p.ListenAddr)
 
 	listener, err := net.Listen("tcp", p.ListenAddr)
 	if err != nil {
@@ -101,18 +102,14 @@ func (p *TCPProxy) handleConnection(conn net.Conn) {
 	originatorIP, originatorPortStr, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	originatorPort, _ := strconv.Atoi(originatorPortStr)
 
-	// Use the PublicAddr for the payload so the client knows which forward this is.
-	publicHost, publicPortStr, _ := net.SplitHostPort(p.PublicAddr)
-	publicPort, _ := strconv.Atoi(publicPortStr)
-
 	payload := ssh.Marshal(&struct {
 		ConnectedAddr  string
 		ConnectedPort  uint32
 		OriginatorIP   string
 		OriginatorPort uint32
 	}{
-		ConnectedAddr:  publicHost,
-		ConnectedPort:  uint32(publicPort),
+		ConnectedAddr:  "0.0.0.0", // The address the client originally requested to bind to
+		ConnectedPort:  p.PublicPort,
 		OriginatorIP:   originatorIP,
 		OriginatorPort: uint32(originatorPort),
 	})
@@ -120,17 +117,17 @@ func (p *TCPProxy) handleConnection(conn net.Conn) {
 	channel, reqs, err := p.sshConn.OpenChannel("forwarded-tcpip", payload)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
-			"public_addr": p.PublicAddr,
-		}).WithError(err).Error("Failed to open 'forwarded-tcpip' SSH channel for raw TCP proxy")
+			"public_port": p.PublicPort,
+		}).WithError(err).Error("Failed to open 'forwarded-tcpip' SSH channel for bridge")
 		return
 	}
 	defer channel.Close()
 	go ssh.DiscardRequests(reqs)
 
 	logrus.WithFields(logrus.Fields{
-		"public_addr": p.PublicAddr,
+		"public_port": p.PublicPort,
 		"remote_addr": conn.RemoteAddr(),
-	}).Info("Proxying raw TCP connection to SSH channel")
+	}).Info("Proxying bridged TCP connection to SSH channel")
 
 	proxyData(conn, channel)
 }

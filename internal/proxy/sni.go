@@ -3,18 +3,15 @@ package proxy
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/ssh"
 	"zcdns-tunnel/internal/tunnel"
 )
 
@@ -233,50 +230,189 @@ func (p *SNIProxy) handleDefaultTCPConnection(clientConn net.Conn) {
 func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	var sniHost string
-	err := tls.Server(clientConn, &tls.Config{
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			sniHost = hello.ServerName
-			// Return a dummy error to stop the handshake after getting the SNI
-			return nil, fmt.Errorf("just-a-trick-to-get-sni")
-		},
-	}).Handshake()
+	// The connection is already a prefixedConn, so its reader has the peeked data.
+	buffReader := clientConn.(*prefixedConn).r
 
-	// We expect the "trick" error, any other error is a problem.
-	if err != nil && !strings.Contains(err.Error(), "just-a-trick-to-get-sni") {
-		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to extract SNI from TLS handshake")
+	sniHost, err := extractSNI(buffReader)
+	if err != nil {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to extract SNI")
+		// As a fallback, treat as generic TCP. The default handler will take over.
+		p.handleDefaultTCPConnection(clientConn)
 		return
 	}
 
 	if sniHost == "" {
-		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("SNI hostname not found in TLS handshake")
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("SNI hostname not found, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(clientConn)
 		return
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"remote_addr":  clientConn.RemoteAddr(),
 		"sni_hostname": sniHost,
+		"proxy_type":   "SNI",
 	}).Info("Extracted SNI hostname")
 
-	sshConn, ok := p.Manager.LoadClient(sniHost)
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(sniHost)
 	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": sniHost}).Error("Tunnel for domain not found")
+		logrus.WithFields(logrus.Fields{"domain": sniHost}).Error("Bridge for domain not found")
 		return
 	}
 
-	p.proxyToSSHChannel(clientConn, sshConn, sniHost)
+	backendConn, err := net.Dial("tcp", bridgeAddr)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"domain":      sniHost,
+			"bridge_addr": bridgeAddr,
+		}).WithError(err).Error("Failed to connect to internal bridge for SNI proxy")
+		return
+	}
+
+	// We don't need to re-wrap the connection here because the clientConn still holds
+	// the buffered data that was peeked. When proxyData copies from it, the buffered
+	// data will be read first, followed by the rest of the stream.
+	proxyData(clientConn, backendConn)
+}
+
+// extractSNI manually parses the TLS ClientHello to get the server name, without
+// completing the handshake. This is more efficient than the previous method.
+func extractSNI(reader *bufio.Reader) (string, error) {
+	// Peek at the TLS record header
+	header, err := reader.Peek(5)
+	if err != nil {
+		return "", fmt.Errorf("failed to peek TLS record header: %w", err)
+	}
+
+	// Check if it's a TLS handshake record
+	if header[0] != 0x16 { // 0x16 = Handshake
+		return "", fmt.Errorf("not a TLS handshake record")
+	}
+
+	// The total length of the record is in bytes 3 and 4.
+	recordLen := int(header[3])<<8 | int(header[4])
+	if reader.Buffered() < recordLen+5 {
+		// The full record is not yet in the buffer. This can happen with fragmented
+		// ClientHello messages. For simplicity, we'll fail here. A more robust
+		// implementation might wait for more data.
+		return "", fmt.Errorf("fragmented ClientHello not supported")
+	}
+
+	// Peek the entire record
+	record, err := reader.Peek(recordLen + 5)
+	if err != nil {
+		return "", fmt.Errorf("failed to peek full TLS record: %w", err)
+	}
+
+	// We're looking for the Server Name Indication (SNI) extension.
+	// The structure is roughly:
+	// - Record Header (5 bytes)
+	// - Handshake Header (4 bytes)
+	// - Client Version (2 bytes)
+	// - Client Random (32 bytes)
+	// - Session ID Length (1 byte) + Session ID
+	// - Cipher Suites Length (2 bytes) + Cipher Suites
+	// - Compression Methods Length (1 byte) + Compression Methods
+	// - Extensions Length (2 bytes) + Extensions
+	// We need to parse this to find the extensions block.
+
+	// A full TLS parser is complex. We'll use a simplified approach to find the SNI.
+	// We'll look for the SNI extension type (0x0000) in the extensions part.
+	// This is not foolproof but works for most standard ClientHello messages.
+
+	// Let's find the extensions block. We skip the static parts.
+	offset := 5 + 4 + 2 + 32 // Record header, handshake header, version, random
+
+	// Skip Session ID
+	sessionIDLen := int(record[offset])
+	offset += 1 + sessionIDLen
+
+	// Skip Cipher Suites
+	cipherSuitesLen := int(record[offset])<<8 | int(record[offset+1])
+	offset += 2 + cipherSuitesLen
+
+	// Skip Compression Methods
+	compressionMethodsLen := int(record[offset])
+	offset += 1 + compressionMethodsLen
+
+	// Now we should be at the extensions
+	if offset+2 > len(record) {
+		return "", fmt.Errorf("no extensions found in ClientHello")
+	}
+
+	extensionsLen := int(record[offset])<<8 | int(record[offset+1])
+	offset += 2
+	extensionsEnd := offset + extensionsLen
+
+	if extensionsEnd > len(record) {
+		return "", fmt.Errorf("invalid extensions length")
+	}
+
+	// Iterate through extensions
+	for offset < extensionsEnd {
+		if offset+4 > extensionsEnd {
+			break
+		}
+		extType := int(record[offset])<<8 | int(record[offset+1])
+		extLen := int(record[offset+2])<<8 | int(record[offset+3])
+		offset += 4
+
+		if extType == 0x0000 { // SNI Extension
+			// We found it. Now parse the SNI data.
+			if offset+extLen > extensionsEnd {
+				return "", fmt.Errorf("invalid SNI extension length")
+			}
+			sniBlock := record[offset : offset+extLen]
+
+			// SNI block contains a list of names.
+			// First 2 bytes are the list length.
+			if len(sniBlock) < 2 {
+				return "", fmt.Errorf("invalid SNI block")
+			}
+			listLen := int(sniBlock[0])<<8 | int(sniBlock[1])
+			if listLen+2 != len(sniBlock) {
+				return "", fmt.Errorf("SNI list length mismatch")
+			}
+
+			// Move to the first name entry
+			sniBlock = sniBlock[2:]
+			for len(sniBlock) > 0 {
+				// Name type (1 byte) and name length (2 bytes)
+				if len(sniBlock) < 3 {
+					return "", fmt.Errorf("incomplete SNI name entry")
+				}
+				nameType := sniBlock[0]
+				nameLen := int(sniBlock[1])<<8 | int(sniBlock[2])
+				sniBlock = sniBlock[3:]
+
+				if nameType == 0x00 { // Hostname
+					if len(sniBlock) < nameLen {
+						return "", fmt.Errorf("hostname length mismatch in SNI")
+					}
+					return string(sniBlock[:nameLen]), nil
+				}
+
+				// Move to the next name
+				sniBlock = sniBlock[nameLen:]
+			}
+		}
+
+		offset += extLen
+	}
+
+	return "", fmt.Errorf("SNI extension not found")
 }
 
 // handleHTTPConnection handles plain HTTP traffic by proxying.
 func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	// We need a buffered reader to read the request.
 	// The clientConn is already a prefixedConn, so its reader has the peeked data.
 	buffReader := clientConn.(*prefixedConn).r
 	req, err := http.ReadRequest(buffReader)
 	if err != nil {
 		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to read HTTP request")
+		// Fallback to default TCP handler if reading fails
+		p.handleDefaultTCPConnection(clientConn)
 		return
 	}
 
@@ -289,58 +425,35 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 		"domain":      domain,
 		"source_ip":   clientConn.RemoteAddr(),
 		"request_uri": req.RequestURI,
+		"proxy_type":  "HTTP",
 	}).Info("Identified HTTP request")
 
-	sshConn, ok := p.Manager.LoadClient(domain)
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain)
 	if !ok {
-		// If no specific tunnel is found for the domain, maybe it should go to the default handler?
-		// This is a design choice. For now, we'll treat it as an error.
-		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain not found during HTTP routing")
+		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Bridge for domain not found during HTTP routing")
+		// Optional: could write a 404 response to the client here
 		return
 	}
 
-	// Re-wrap the connection with the buffered reader to ensure no data is lost
-	p.proxyToSSHChannel(clientConn, sshConn, domain)
-}
-
-// proxyToSSHChannel finds the correct SSH client for a domain and proxies the connection.
-func (p *SNIProxy) proxyToSSHChannel(clientConn net.Conn, sshConn ssh.Conn, domain string) {
-	// Get the port that was confirmed to the client for this domain.
-	boundPort, ok := p.Manager.LoadUserBindingPort(domain)
-	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Could not find the bound port for the domain. This should not happen.")
-		return
-	}
-
-	originatorIP, originatorPortStr, _ := net.SplitHostPort(clientConn.RemoteAddr().String())
-	originatorPort, _ := strconv.Atoi(originatorPortStr)
-
-	payload := ssh.Marshal(&struct {
-		ConnectedAddr  string
-		ConnectedPort  uint32
-		OriginatorIP   string
-		OriginatorPort uint32
-	}{
-		ConnectedAddr:  "0.0.0.0", // The address the client requested to bind to
-		ConnectedPort:  boundPort, // The port the server *confirmed* to the client
-		OriginatorIP:   originatorIP,
-		OriginatorPort: uint32(originatorPort),
-	})
-
-	channel, reqs, err := sshConn.OpenChannel("forwarded-tcpip", payload)
+	backendConn, err := net.Dial("tcp", bridgeAddr)
 	if err != nil {
-		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to open 'forwarded-tcpip' SSH channel")
+		logrus.WithFields(logrus.Fields{
+			"domain":      domain,
+			"bridge_addr": bridgeAddr,
+		}).WithError(err).Error("Failed to connect to internal bridge for HTTP proxy")
 		return
 	}
-	defer channel.Close()
-	go ssh.DiscardRequests(reqs)
 
-	logrus.WithFields(logrus.Fields{
-		"domain":      domain,
-		"remote_addr": clientConn.RemoteAddr(),
-	}).Info("Proxying traffic to SSH channel")
+	// We need to forward the entire request, including the body, to the bridge.
+	err = req.Write(backendConn)
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"domain": domain}).WithError(err).Error("Failed to write HTTP request to bridge")
+		return
+	}
 
-	proxyData(clientConn, channel)
+	// After writing the request, proxy the rest of the data (e.g., response from server)
+	// between the client and the bridge.
+	proxyData(clientConn, backendConn)
 }
 
 // proxyData copies data between two connections and logs the process.
