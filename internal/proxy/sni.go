@@ -155,40 +155,47 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	// We need a connection that can have bytes put back
 	prefixedConn := newPrefixedConn(conn, bufio.NewReader(conn))
 
-	// 1. Check for a default backend first for non-TLS traffic.
-	p.defaultTCPBackendMu.RLock()
-	backendAddr := p.defaultTCPBackendAddr
-	p.defaultTCPBackendMu.RUnlock()
-
 	// Peek to check for TLS
 	peeked, err := prefixedConn.r.Peek(1)
 	if err != nil {
-		// If peeking fails, it's definitely not TLS.
-		// If a default backend exists, send it there. Otherwise, close.
-		if backendAddr != "" {
-			p.handleDefaultTCPConnection(prefixedConn)
-		} else {
-			prefixedConn.Close()
-		}
+		// If peeking fails, it's definitely not TLS or valid HTTP.
+		// Treat as generic TCP and let the default handler deal with it.
+		p.handleDefaultTCPConnection(prefixedConn)
 		return
 	}
 
-	// 2. Handle TLS traffic (highest priority)
+	// Priority 1: Handle TLS traffic
 	if peeked[0] == 0x16 {
 		p.handleTLSConnection(prefixedConn)
 		return
 	}
 
-	// 3. If it's not TLS and a default backend exists, use it.
-	// This is the key logic fix: we prioritize the default backend over HTTP routing.
-	if backendAddr != "" {
+	// Priority 2: Handle HTTP traffic
+	// We need to peek more to identify HTTP methods
+	peeked, err = prefixedConn.r.Peek(8)
+	if err != nil {
+		// Not enough data for an HTTP request, treat as generic TCP
 		p.handleDefaultTCPConnection(prefixedConn)
 		return
 	}
+	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
+	isHTTP := false
+	for _, method := range httpMethods {
+		if strings.HasPrefix(string(peeked), method) {
+			isHTTP = true
+			break
+		}
+	}
 
-	// 4. ONLY if no default backend exists, try to handle as HTTP.
-	p.handleHTTPConnection(prefixedConn)
+	if isHTTP {
+		p.handleHTTPConnection(prefixedConn)
+		return
+	}
+
+	// Priority 3 (Fallback): Handle as generic TCP traffic
+	p.handleDefaultTCPConnection(prefixedConn)
 }
+
 
 // handleDefaultTCPConnection handles plain TCP traffic by proxying to the default backend.
 func (p *SNIProxy) handleDefaultTCPConnection(clientConn net.Conn) {
@@ -264,8 +271,9 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	// We need a buffered reader to read the request
-	buffReader := bufio.NewReader(clientConn)
+	// We need a buffered reader to read the request.
+	// The clientConn is already a prefixedConn, so its reader has the peeked data.
+	buffReader := clientConn.(*prefixedConn).r
 	req, err := http.ReadRequest(buffReader)
 	if err != nil {
 		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to read HTTP request")
@@ -285,13 +293,14 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 
 	sshConn, ok := p.Manager.LoadClient(domain)
 	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain not found")
+		// If no specific tunnel is found for the domain, maybe it should go to the default handler?
+		// This is a design choice. For now, we'll treat it as an error.
+		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Tunnel for domain not found during HTTP routing")
 		return
 	}
 
 	// Re-wrap the connection with the buffered reader to ensure no data is lost
-	prefixedConn := newPrefixedConn(clientConn, buffReader)
-	p.proxyToSSHChannel(prefixedConn, sshConn, domain)
+	p.proxyToSSHChannel(clientConn, sshConn, domain)
 }
 
 // proxyToSSHChannel finds the correct SSH client for a domain and proxies the connection.
