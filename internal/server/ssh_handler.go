@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -14,10 +13,18 @@ import (
 
 	"zcdns-tunnel/internal/auth"
 	"zcdns-tunnel/internal/config"
-	proxy_sni "zcdns-tunnel/internal/proxy"
+	"zcdns-tunnel/internal/proxy"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
 	"zcdns-tunnel/internal/tunnel"
 )
+
+// forwarder represents an active TCP forward.
+type forwarder struct {
+	// For shared forwards, this is the address of the intermediary TCP proxy.
+	// For dedicated forwards, this is the public listen address.
+	internalListenAddr string
+	cancel             context.CancelFunc
+}
 
 func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
 	switch newChannel.ChannelType() {
@@ -37,20 +44,27 @@ type SSHServer struct {
 	Config  config.ServerConfig
 	Manager *tunnel.Manager
 
-	sniListeners        map[string]*proxy_sni.SNIProxy
-	listenerRefCounts   map[string]int
-	listenerCancelFuncs map[string]context.CancelFunc
-	mu                  sync.Mutex
+	// For shared, public-facing listeners (0.0.0.0)
+	sniListeners         map[string]*proxy.SNIProxy
+	sniListenerRefCounts map[string]int
+	sniListenerCancel    map[string]context.CancelFunc
+
+	// For private, per-connection listeners (127.0.0.1)
+	// and for intermediary listeners for shared forwards.
+	tcpListeners map[string]context.CancelFunc
+
+	mu sync.Mutex
 }
 
 // NewSSHServer creates a new SSH server instance.
 func NewSSHServer(cfg config.ServerConfig) *SSHServer {
 	return &SSHServer{
-		Config:              cfg,
-		Manager:             tunnel.NewManager(),
-		sniListeners:        make(map[string]*proxy_sni.SNIProxy),
-		listenerRefCounts:   make(map[string]int),
-		listenerCancelFuncs: make(map[string]context.CancelFunc),
+		Config:               cfg,
+		Manager:              tunnel.NewManager(),
+		sniListeners:         make(map[string]*proxy.SNIProxy),
+		sniListenerRefCounts: make(map[string]int),
+		sniListenerCancel:    make(map[string]context.CancelFunc),
+		tcpListeners:         make(map[string]context.CancelFunc),
 	}
 }
 
@@ -89,247 +103,239 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerCo
 		"client_version": string(sshConn.ClientVersion()),
 	}).Info("New SSH connection")
 
-	// Track active forwards for this specific SSH connection
-	activeForwards := make(map[string]struct{})
-
-	// Store the active client connection by domain
 	domain, ok := sshConn.Permissions.Extensions["domain"]
 	if ok && domain != "" {
 		s.Manager.StoreClient(domain, sshConn)
 	}
 
-	// Handle global requests (e.g., tcpip-forward for -R)
-	go s.handleGlobalRequests(sshConn, reqs, activeForwards)
+	// activeForwards maps the *public* listen address to its forwarder details.
+	activeForwards := make(map[string]*forwarder)
 
-	// Service the incoming channels (e.g., direct-tcpip for -L, forwarded-tcpip for -R)
+	connCtx, connCancel := context.WithCancel(context.Background())
+	defer connCancel()
+
+	go s.handleGlobalRequests(connCtx, sshConn, reqs, activeForwards)
+
 	for newChannel := range chans {
 		go s.handleChannel(sshConn, newChannel)
 	}
 
+	<-connCtx.Done() // Wait for connection to be explicitly closed.
+
 	logrus.WithFields(logrus.Fields{
 		"remote_addr": sshConn.RemoteAddr(),
-	}).Info("SSH connection closed.")
+	}).Info("SSH connection closed. Cleaning up resources.")
 
-	// Clean up active client entry and associated remote listeners
 	if ok && domain != "" {
 		s.Manager.DeleteClient(domain, sshConn)
 		s.Manager.DeleteDomainForwardedPort(domain)
 	}
 
-	// Clean up dynamically created SNI listeners if no longer referenced
 	s.mu.Lock()
-	for listenAddr := range activeForwards {
-		s.listenerRefCounts[listenAddr]--
-		if s.listenerRefCounts[listenAddr] <= 0 {
-			logrus.WithFields(logrus.Fields{
-				"listen_addr": listenAddr,
-			}).Info("Shutting down dynamic SNI listener as no more references")
-			if cancel, exists := s.listenerCancelFuncs[listenAddr]; exists {
-				cancel()
-				delete(s.sniListeners, listenAddr)
-				delete(s.listenerRefCounts, listenAddr)
-				delete(s.listenerCancelFuncs, listenAddr)
+	defer s.mu.Unlock()
+
+	for publicAddr, fwd := range activeForwards {
+		// Shutdown the dedicated/intermediary listener
+		fwd.cancel()
+		delete(s.tcpListeners, fwd.internalListenAddr)
+
+		// If it was a shared listener, update the SNI proxy
+		if sniProxy, exists := s.sniListeners[publicAddr]; exists {
+			sniProxy.ClearDefaultTCPBackend(fwd.internalListenAddr)
+			s.sniListenerRefCounts[publicAddr]--
+			if s.sniListenerRefCounts[publicAddr] <= 0 {
+				logrus.WithFields(logrus.Fields{
+					"listen_addr": publicAddr,
+				}).Info("Shutting down dynamic SNI listener as no more references")
+				s.sniListenerCancel[publicAddr]()
+				delete(s.sniListeners, publicAddr)
+				delete(s.sniListenerRefCounts, publicAddr)
+				delete(s.sniListenerCancel, publicAddr)
 			}
 		}
 	}
-	s.mu.Unlock()
 }
 
-func (s *SSHServer) handleGlobalRequests(sshConn *gossh.ServerConn, reqs <-chan *gossh.Request, activeForwards map[string]struct{}) {
+func (s *SSHServer) handleGlobalRequests(ctx context.Context, sshConn *gossh.ServerConn, reqs <-chan *gossh.Request, activeForwards map[string]*forwarder) {
 	domain, ok := sshConn.Permissions.Extensions["domain"]
 	if !ok || domain == "" {
-		logrus.WithFields(logrus.Fields{
-			"remote_addr": sshConn.RemoteAddr(),
-		}).Error("No domain found in SSH connection permissions for global request")
 		return
 	}
 
 	for req := range reqs {
-		switch req.Type {
-		case "tcpip-forward":
-			var payload struct {
-				BindAddr string
-				BindPort uint32
-			}
-			if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
-				logrus.WithFields(logrus.Fields{
-					"remote_addr":   sshConn.RemoteAddr(),
-					logrus.ErrorKey: err,
-				}).Error("Failed to unmarshal tcpip-forward request")
-				req.Reply(false, nil)
-				continue
-			}
-
-			listenAddr := net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(payload.BindPort)))
-			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"listen_addr": listenAddr,
-			}).Info("Received tcpip-forward request")
-
-			s.mu.Lock()
-			proxy, exists := s.sniListeners[listenAddr]
-			if !exists {
-				proxy = proxy_sni.NewSNIProxy(s.Manager, listenAddr)
-				s.sniListeners[listenAddr] = proxy
-				
-				listenerCtx, cancel := context.WithCancel(context.Background())
-				s.listenerCancelFuncs[listenAddr] = cancel
-
-				// Start listening in a goroutine
-				go func() {
-					if err := proxy.ListenAndServe(listenerCtx); err != nil {
-						logrus.Printf("SNI proxy on %s exited with error: %v", listenAddr, err)
-					}
-				}()
-			}
-			s.listenerRefCounts[listenAddr]++
-			activeForwards[listenAddr] = struct{}{}
-			s.mu.Unlock()
-
-			// IMPORTANT: Wait for the listener to be ready to get the actual port
-			actualPort, err := proxy.GetListenPort(5 * time.Second)
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"remote_addr": sshConn.RemoteAddr(),
-					"listen_addr": listenAddr,
-					logrus.ErrorKey: err,
-				}).Error("Failed to get actual listening port from proxy")
-				req.Reply(false, nil)
-				continue
-			}
-
-			// Store the actual port for the domain
-			s.Manager.StoreUserBindingPort(domain, actualPort)
-
-			// Acknowledge the request with the actual port
-			req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: actualPort}))
-			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"listen_addr": listenAddr,
-				"actual_port": actualPort,
-			}).Info("Successfully acknowledged tcpip-forward request")
-
-		case "cancel-tcpip-forward":
-			var payload struct {
-				BindAddr string
-				BindPort uint32
-			}
-			if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
-				logrus.WithFields(logrus.Fields{
-					"remote_addr":   sshConn.RemoteAddr(),
-					logrus.ErrorKey: err,
-				}).Error("Failed to unmarshal cancel-tcpip-forward request")
-				req.Reply(false, nil)
-				continue
-			}
-
-			listenAddr := net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(payload.BindPort)))
-			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"listen_addr": listenAddr,
-			}).Info("Received cancel-tcpip-forward request")
-
-			s.mu.Lock()
-			if _, exists := activeForwards[listenAddr]; exists {
-				s.listenerRefCounts[listenAddr]--
-				delete(activeForwards, listenAddr)
-				if s.listenerRefCounts[listenAddr] <= 0 {
-					if cancel, exists := s.listenerCancelFuncs[listenAddr]; exists {
-						cancel()
-						delete(s.sniListeners, listenAddr)
-						delete(s.listenerRefCounts, listenAddr)
-						delete(s.listenerCancelFuncs, listenAddr)
-					}
+		go func(req *gossh.Request) {
+			switch req.Type {
+			case "tcpip-forward":
+				s.handleTCPIPForward(ctx, sshConn, req, activeForwards, domain)
+			case "cancel-tcpip-forward":
+				s.handleCancelTCPIPForward(req, activeForwards)
+			default:
+				if req.WantReply {
+					req.Reply(false, nil)
 				}
 			}
-			s.mu.Unlock()
-			req.Reply(true, nil)
-
-		default:
-			if req.WantReply {
-				req.Reply(false, nil)
-			}
-		}
+		}(req)
 	}
 }
 
-// handleRemoteForwardedConnections accepts connections on a remotely forwarded port
-// and proxies them back to the SSH client.
-func (s *SSHServer) handleRemoteForwardedConnections(sshConn *gossh.ServerConn, listener net.Listener, bindAddr string, bindPort uint32) {
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			// Listener closed, or other error. Log and exit.
-			logrus.WithFields(logrus.Fields{
-				"remote_addr":   sshConn.RemoteAddr(),
-				"bind_addr":     bindAddr,
-				"bind_port":     bindPort,
-				logrus.ErrorKey: err,
-			}).Info("Remote forwarded listener stopped accepting connections.")
-			return
+func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.ServerConn, req *gossh.Request, activeForwards map[string]*forwarder, domain string) {
+	var payload struct {
+		BindAddr string
+		BindPort uint32
+	}
+	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+		req.Reply(false, nil)
+		return
+	}
+
+	publicListenAddr := net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(payload.BindPort)))
+	logrus.WithFields(logrus.Fields{
+		"remote_addr": sshConn.RemoteAddr(),
+		"listen_addr": publicListenAddr,
+		"domain":      domain,
+	}).Info("Received tcpip-forward request")
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// --- SHARED LISTENER (0.0.0.0) LOGIC ---
+	if payload.BindAddr == "0.0.0.0" {
+		// 1. Ensure the public SNIProxy listener exists
+		sniProxy, exists := s.sniListeners[publicListenAddr]
+		if !exists {
+			sniProxy = proxy.NewSNIProxy(s.Manager, publicListenAddr)
+			s.sniListeners[publicListenAddr] = sniProxy
+
+			sniCtx, sniCancel := context.WithCancel(context.Background())
+			s.sniListenerCancel[publicListenAddr] = sniCancel
+
+			go func() {
+				if err := sniProxy.ListenAndServe(sniCtx); err != nil {
+					logrus.WithError(err).WithField("listen_addr", publicListenAddr).Error("SNI proxy exited with error")
+				}
+			}()
 		}
 
-		logrus.WithFields(logrus.Fields{
-			"remote_addr": sshConn.RemoteAddr(),
-			"bind_addr":   bindAddr,
-			"bind_port":   bindPort,
-			"client_conn": conn.RemoteAddr(),
-		}).Info("Accepted connection on remote forwarded port.")
+		// 2. Create the intermediary TCP proxy on 127.0.0.1:0
+		intermediaryAddr := "127.0.0.1:0"
+		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, sshConn)
+		intermedCtx, intermedCancel := context.WithCancel(ctx)
 
 		go func() {
-			defer conn.Close()
-
-			// Open a forwarded-tcpip channel back to the client
-			channel, requests, err := sshConn.OpenChannel("forwarded-tcpip", gossh.Marshal(&struct {
-				ConnectedAddr  string
-				ConnectedPort  uint32
-				OriginatorIP   string
-				OriginatorPort uint32
-			}{
-				ConnectedAddr:  bindAddr,
-				ConnectedPort:  bindPort,
-				OriginatorIP:   conn.RemoteAddr().(*net.TCPAddr).IP.String(),
-				OriginatorPort: uint32(conn.RemoteAddr().(*net.TCPAddr).Port),
-			}))
-			if err != nil {
-				logrus.WithFields(logrus.Fields{
-					"remote_addr":   sshConn.RemoteAddr(),
-					"bind_addr":     bindAddr,
-					"bind_port":     bindPort,
-					logrus.ErrorKey: err,
-				}).Error("Failed to open forwarded-tcpip channel.")
-				return
+			if err := intermediaryProxy.ListenAndServe(intermedCtx); err != nil {
+				logrus.WithError(err).WithField("listen_addr", intermediaryAddr).Warn("Intermediary TCP proxy exited with error")
 			}
-			defer channel.Close()
-
-			go gossh.DiscardRequests(requests)
-
-			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"bind_addr":   bindAddr,
-				"bind_port":   bindPort,
-			}).Info("Proxying traffic for remote forwarded connection.")
-
-			var wg sync.WaitGroup
-			wg.Add(2)
-
-			go func() {
-				defer wg.Done()
-				io.Copy(channel, conn)
-				channel.CloseWrite()
-			}()
-			go func() {
-				defer wg.Done()
-				io.Copy(conn, channel)
-				// conn.CloseWrite() // Not needed as defer conn.Close() handles it
-			}()
-
-			wg.Wait()
-			logrus.WithFields(logrus.Fields{
-				"remote_addr": sshConn.RemoteAddr(),
-				"bind_addr":   bindAddr,
-				"bind_port":   bindPort,
-			}).Info("Remote forwarded proxying finished.")
 		}()
+
+		// 3. Get the actual listening port of the intermediary
+		intermedPort, err := intermediaryProxy.GetListenPort(5 * time.Second)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to get intermediary listener port")
+			intermedCancel()
+			req.Reply(false, nil)
+			return
+		}
+		actualIntermediaryAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(intermedPort)))
+
+		// 4. Set the intermediary as the default backend for the SNI proxy
+		if !sniProxy.SetDefaultTCPBackend(actualIntermediaryAddr) {
+			logrus.WithField("listen_addr", publicListenAddr).Warn("Could not set default TCP backend, one already exists.")
+			// We don't treat this as a fatal error. The client can still serve SNI/HTTP.
+		}
+
+		// 5. Record the forward
+		s.tcpListeners[actualIntermediaryAddr] = intermedCancel
+		activeForwards[publicListenAddr] = &forwarder{
+			internalListenAddr: actualIntermediaryAddr,
+			cancel:             intermedCancel,
+		}
+		s.sniListenerRefCounts[publicListenAddr]++
+
+		// 6. Reply to client with the public port
+		publicPort, err := sniProxy.GetListenPort(5 * time.Second)
+		if err != nil {
+			logrus.WithError(err).Error("Failed to get public SNI listener port")
+			req.Reply(false, nil)
+			return
+		}
+		s.Manager.StoreUserBindingPort(domain, publicPort)
+		req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: publicPort}))
+		logrus.WithFields(logrus.Fields{"public_port": publicPort, "intermediary_addr": actualIntermediaryAddr}).Info("Shared forward established")
+
+		return
+	}
+
+	// --- DEDICATED LISTENER (e.g., 127.0.0.1) LOGIC ---
+	if _, exists := s.tcpListeners[publicListenAddr]; exists {
+		logrus.WithField("listen_addr", publicListenAddr).Warn("Dedicated listener address already in use")
+		req.Reply(false, nil)
+		return
+	}
+
+	tcpProxy := proxy.NewTCPProxy(publicListenAddr, sshConn)
+	listenerCtx, cancel := context.WithCancel(ctx)
+
+	go func() {
+		if err := tcpProxy.ListenAndServe(listenerCtx); err != nil {
+			logrus.WithError(err).WithField("listen_addr", publicListenAddr).Warn("Dedicated TCP proxy exited with error")
+		}
+	}()
+
+	actualPort, err := tcpProxy.GetListenPort(5 * time.Second)
+	if err != nil {
+		logrus.WithError(err).Error("Failed to get dedicated listener port")
+		cancel()
+		req.Reply(false, nil)
+		return
+	}
+
+	actualListenAddr := net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(actualPort)))
+	s.tcpListeners[actualListenAddr] = cancel
+	activeForwards[publicListenAddr] = &forwarder{
+		internalListenAddr: actualListenAddr, // For dedicated, internal is the same as public
+		cancel:             cancel,
+	}
+
+	s.Manager.StoreUserBindingPort(domain, actualPort)
+	req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: actualPort}))
+	logrus.WithField("actual_port", actualPort).Info("Dedicated forward established")
+}
+
+func (s *SSHServer) handleCancelTCPIPForward(req *gossh.Request, activeForwards map[string]*forwarder) {
+	var payload struct {
+		BindAddr string
+		BindPort uint32
+	}
+	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+		req.Reply(false, nil)
+		return
+	}
+	publicListenAddr := net.JoinHostPort(payload.BindAddr, strconv.Itoa(int(payload.BindPort)))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if fwd, exists := activeForwards[publicListenAddr]; exists {
+		// Stop the listener (intermediary or dedicated)
+		fwd.cancel()
+		delete(s.tcpListeners, fwd.internalListenAddr)
+
+		// If it was a shared listener, update the SNI proxy
+		if sniProxy, ok := s.sniListeners[publicListenAddr]; ok {
+			sniProxy.ClearDefaultTCPBackend(fwd.internalListenAddr)
+			s.sniListenerRefCounts[publicListenAddr]--
+			if s.sniListenerRefCounts[publicListenAddr] <= 0 {
+				s.sniListenerCancel[publicListenAddr]()
+				delete(s.sniListeners, publicListenAddr)
+				delete(s.sniListenerRefCounts, publicListenAddr)
+				delete(s.sniListenerCancel, publicListenAddr)
+			}
+		}
+		delete(activeForwards, publicListenAddr)
+		req.Reply(true, nil)
+		logrus.WithField("listen_addr", publicListenAddr).Info("Canceled tcpip-forward")
+	} else {
+		req.Reply(false, nil)
+		logrus.WithField("listen_addr", publicListenAddr).Warn("Received cancel request for unknown forward")
 	}
 }
