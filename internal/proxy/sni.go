@@ -68,6 +68,13 @@ func (p *SNIProxy) ClearDefaultTCPBackend(addr string) {
 	}
 }
 
+// HasDefaultTCPBackend returns true if a default backend is currently configured.
+func (p *SNIProxy) HasDefaultTCPBackend() bool {
+	p.defaultTCPBackendMu.RLock()
+	defer p.defaultTCPBackendMu.RUnlock()
+	return p.defaultTCPBackendAddr != ""
+}
+
 // GetListenPort waits for the listener to be initialized and returns the actual listening port.
 func (p *SNIProxy) GetListenPort(timeout time.Duration) (uint32, error) {
 	deadline := time.After(timeout)
