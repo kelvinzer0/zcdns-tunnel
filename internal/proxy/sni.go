@@ -145,37 +145,42 @@ func isTemporary(err error) bool {
 
 // handleConnectionMultiplex sniffs the protocol and delegates to the appropriate handler.
 func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
-	buffReader := bufio.NewReader(conn)
-	peeked, err := buffReader.Peek(1) // Peek just one byte for TLS check
-	if err != nil {
-		// If peeking fails, it's likely not a valid TLS or HTTP request.
-		// Treat it as generic TCP traffic.
-		p.handleDefaultTCPConnection(newPrefixedConn(conn, buffReader))
-		return
-	}
+	// We need a connection that can have bytes put back
+	prefixedConn := newPrefixedConn(conn, bufio.NewReader(conn))
 
-	// TLS check
-	if peeked[0] == 0x16 {
-		p.handleTLSConnection(newPrefixedConn(conn, buffReader))
-		return
-	}
+	// 1. Check for a default backend first for non-TLS traffic.
+	p.defaultTCPBackendMu.RLock()
+	backendAddr := p.defaultTCPBackendAddr
+	p.defaultTCPBackendMu.RUnlock()
 
-	// HTTP check (peek more bytes)
-	peeked, err = buffReader.Peek(8)
+	// Peek to check for TLS
+	peeked, err := prefixedConn.r.Peek(1)
 	if err != nil {
-		p.handleDefaultTCPConnection(newPrefixedConn(conn, buffReader))
-		return
-	}
-	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
-	for _, method := range httpMethods {
-		if strings.HasPrefix(string(peeked), method) {
-			p.handleHTTPConnection(newPrefixedConn(conn, buffReader))
-			return
+		// If peeking fails, it's definitely not TLS.
+		// If a default backend exists, send it there. Otherwise, close.
+		if backendAddr != "" {
+			p.handleDefaultTCPConnection(prefixedConn)
+		} else {
+			prefixedConn.Close()
 		}
+		return
 	}
 
-	// Fallback to default TCP proxy
-	p.handleDefaultTCPConnection(newPrefixedConn(conn, buffReader))
+	// 2. Handle TLS traffic (highest priority)
+	if peeked[0] == 0x16 {
+		p.handleTLSConnection(prefixedConn)
+		return
+	}
+
+	// 3. If it's not TLS and a default backend exists, use it.
+	// This is the key logic fix: we prioritize the default backend over HTTP routing.
+	if backendAddr != "" {
+		p.handleDefaultTCPConnection(prefixedConn)
+		return
+	}
+
+	// 4. ONLY if no default backend exists, try to handle as HTTP.
+	p.handleHTTPConnection(prefixedConn)
 }
 
 // handleDefaultTCPConnection handles plain TCP traffic by proxying to the default backend.
