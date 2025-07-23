@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"crypto/tls"
+	
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -232,25 +234,160 @@ func (p *SNIProxy) handleDefaultTCPConnection(clientConn net.Conn) {
 func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 
-	var sniHost string
-	err := tls.Server(clientConn, &tls.Config{
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			sniHost = hello.ServerName
-			// Return a dummy error to stop the handshake after getting the SNI
-			return nil, fmt.Errorf("just-a-trick-to-get-sni")
-		},
-	}).Handshake()
+	prefixed := clientConn.(*prefixedConn)
+	reader := prefixed.r
 
-	// We expect the "trick" error, any other error is a problem.
-	if err != nil && !strings.Contains(err.Error(), "just-a-trick-to-get-sni") {
-		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to extract SNI from TLS handshake")
+	// Read the entire ClientHello message into a buffer.
+	// We need to peek enough to get the full ClientHello, which can be variable length.
+	// A typical ClientHello is usually less than 1KB, but can be larger.
+	// We'll peek a reasonable amount, then read the full record.
+
+	// Peek at the TLS record header (5 bytes)
+	header, err := reader.Peek(5)
+	if err != nil {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to peek TLS record header")
+		p.handleDefaultTCPConnection(prefixed)
 		return
 	}
 
+	// Check if it's a TLS handshake record (0x16)
+	if header[0] != 0x16 {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Not a TLS handshake record, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+
+	// Get the total length of the TLS record from bytes 3 and 4 of the header.
+	recordLen := int(binary.BigEndian.Uint16(header[3:5]))
+
+	// Read the entire TLS record (header + recordLen bytes)
+	fullRecord := make([]byte, 5+recordLen)
+	_, err = io.ReadFull(reader, fullRecord)
+	if err != nil {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to read full TLS record")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+
+	// Now, parse the ClientHello from the fullRecord to extract SNI.
+	// The ClientHello message starts after the 5-byte TLS record header.
+	clientHelloData := fullRecord[5:]
+
+	// ClientHello Handshake Header (4 bytes): Type (0x01), Length (3 bytes)
+	if len(clientHelloData) < 4 || clientHelloData[0] != 0x01 {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Not a valid ClientHello message, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+
+	// Skip ClientHello header (4 bytes)
+	offset := 4
+
+	// Skip Client Version (2 bytes)
+	offset += 2
+
+	// Skip Random (32 bytes)
+	offset += 32
+
+	// Skip Session ID (1 byte length + Session ID)
+	if offset+1 > len(clientHelloData) {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed ClientHello: missing Session ID length")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+	sessionIDLen := int(clientHelloData[offset])
+	offset += 1 + sessionIDLen
+
+	// Skip Cipher Suites (2 bytes length + Cipher Suites)
+	if offset+2 > len(clientHelloData) {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed ClientHello: missing Cipher Suites length")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+	cipherSuitesLen := int(binary.BigEndian.Uint16(clientHelloData[offset : offset+2]))
+	offset += 2 + cipherSuitesLen
+
+	// Skip Compression Methods (1 byte length + Compression Methods)
+	if offset+1 > len(clientHelloData) {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed ClientHello: missing Compression Methods length")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+	compressionMethodsLen := int(clientHelloData[offset])
+	offset += 1 + compressionMethodsLen
+
+	// Now we should be at the Extensions section.
+	if offset+2 > len(clientHelloData) {
+		// No extensions or malformed extensions length
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("No TLS extensions found or malformed length, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+	extensionsLen := int(binary.BigEndian.Uint16(clientHelloData[offset : offset+2]))
+	offset += 2
+	extensionsEnd := offset + extensionsLen
+
+	if extensionsEnd > len(clientHelloData) {
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed TLS extensions length, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(prefixed)
+		return
+	}
+
+	sniHost := ""
+	// Iterate through extensions to find SNI (type 0x0000)
+	for offset < extensionsEnd {
+		if offset+4 > extensionsEnd {
+			logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed TLS extension entry, stopping parsing")
+			break
+		}
+		extType := binary.BigEndian.Uint16(clientHelloData[offset : offset+2])
+		extLen := int(binary.BigEndian.Uint16(clientHelloData[offset+2 : offset+4]))
+		offset += 4
+
+		if extType == 0x0000 { // SNI Extension
+			if offset+extLen > extensionsEnd {
+				logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed SNI extension length")
+				break
+			}
+			sniData := clientHelloData[offset : offset+extLen]
+
+			// SNI data format: list length (2 bytes) + list of SNI entries
+			if len(sniData) < 2 {
+				logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed SNI data: missing list length")
+				break
+			}
+			// sniListLen := binary.BigEndian.Uint16(sniData[0:2]) // Not strictly needed if we iterate
+			sniData = sniData[2:] // Skip list length
+
+			for len(sniData) > 0 {
+				if len(sniData) < 3 {
+					logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed SNI entry: too short")
+					break
+				}
+				nameType := sniData[0] // 0x00 for hostname
+				nameLen := int(binary.BigEndian.Uint16(sniData[1:3]))
+				sniData = sniData[3:]
+
+				if nameType == 0x00 { // Hostname
+					if len(sniData) < nameLen {
+						logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("Malformed SNI hostname: length mismatch")
+						break
+					}
+					sniHost = string(sniData[:nameLen])
+					break // Found SNI, no need to parse further
+				}
+				sniData = sniData[nameLen:] // Skip to next SNI entry
+			}
+		}
+		offset += extLen // Move to next extension
+	}
+
+	// Prepend the full ClientHello record back to the connection.
+	prefixed.Prepend(fullRecord)
+
 	if sniHost == "" {
-		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("SNI hostname not found in TLS handshake")
-		// Fallback to default TCP handler if SNI is not found
-		p.handleDefaultTCPConnection(clientConn)
+		logrus.WithField("remote_addr", clientConn.RemoteAddr()).Warn("SNI hostname not found in TLS handshake, falling back to default TCP handler")
+		p.handleDefaultTCPConnection(prefixed)
 		return
 	}
 
@@ -275,9 +412,7 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 		return
 	}
 
-	// The clientConn still holds the buffered data that was peeked.
-	// When proxyData copies from it, the buffered data will be read first, followed by the rest of the stream.
-	proxyData(clientConn, backendConn)
+	proxyData(prefixed, backendConn)
 }
 
 // handleHTTPConnection handles plain HTTP traffic by proxying.
@@ -366,6 +501,11 @@ func newPrefixedConn(conn net.Conn, r *bufio.Reader) *prefixedConn {
 		Conn: conn,
 		r:    r,
 	}
+}
+
+// Prepend prepends data to the buffered reader, making it available for subsequent reads.
+func (c *prefixedConn) Prepend(data []byte) {
+	c.r = bufio.NewReader(io.MultiReader(bytes.NewReader(data), c.r))
 }
 
 func (c *prefixedConn) Read(p []byte) (n int, err error) {
