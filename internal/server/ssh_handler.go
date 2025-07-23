@@ -218,7 +218,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 
 		// 2. Create the intermediary TCP proxy on 127.0.0.1:0
 		intermediaryAddr := "127.0.0.1:0"
-		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, sshConn)
+		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, publicListenAddr, sshConn)
 		intermedCtx, intermedCancel := context.WithCancel(ctx)
 
 		go func() {
@@ -272,7 +272,8 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		return
 	}
 
-	tcpProxy := proxy.NewTCPProxy(publicListenAddr, sshConn)
+	// For dedicated listeners, the public address is the listen address.
+	tcpProxy := proxy.NewTCPProxy(publicListenAddr, publicListenAddr, sshConn)
 	listenerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
