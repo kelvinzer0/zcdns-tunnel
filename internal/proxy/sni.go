@@ -174,10 +174,18 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	// We need to peek more to identify HTTP methods
 	peeked, err = prefixedConn.r.Peek(1024) // Peek up to 1KB for HTTP header
 	if err != nil && err != io.EOF {
-		// Not enough data for an HTTP request, treat as generic TCP
+		logrus.WithField("remote_addr", conn.RemoteAddr()).WithError(err).Warn("Failed to peek for HTTP")
 		p.handleDefaultTCPConnection(prefixedConn)
 		return
 	}
+
+	// Log the peeked data for debugging
+	logrus.WithFields(logrus.Fields{
+		"remote_addr": conn.RemoteAddr(),
+		"peeked_data": string(peeked),
+		"peeked_len":  len(peeked),
+	}).Debug("Peeked data for HTTP detection")
+
 	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
 	isHTTP := false
 	for _, method := range httpMethods {
@@ -186,6 +194,11 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 			break
 		}
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"remote_addr": conn.RemoteAddr(),
+		"is_http":     isHTTP,
+	}).Debug("HTTP detection result")
 
 	if isHTTP {
 		p.handleHTTPConnection(prefixedConn)
@@ -403,7 +416,9 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 		return
 	}
 
-	bridgeAddr, ok := p.Manager.LoadBridgeAddress(sniHost, uint32(publicPort))
+	protocolPrefix := "tls"
+
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(sniHost, protocolPrefix, uint32(publicPort))
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": sniHost}).Error("Bridge for domain not found")
 		return
@@ -453,7 +468,9 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 		return
 	}
 
-	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain, uint32(publicPort))
+	protocolPrefix := "http"
+
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain, protocolPrefix, uint32(publicPort))
 	if !ok {
 		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Bridge for domain not found during HTTP routing")
 		// Optional: could write a 404 response to the client here

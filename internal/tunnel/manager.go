@@ -21,12 +21,18 @@ type Manager struct {
 	// domainForwardedPorts maps domain to the actual port bound for remote forwarding
 	domainForwardedPorts sync.Map // map[string]uint32
 
-	// domainBridgeAddrs maps domain to its domainPortBridges.
-	domainBridgeAddrs sync.Map // map[string]*domainPortBridges
+	// domainBridgeAddrs maps domain to its domainProtocolBridges.
+	domainBridgeAddrs sync.Map // map[string]*domainProtocolBridges
 }
 
-// domainPortBridges holds a map of public ports to their internal bridge addresses.
-type domainPortBridges struct {
+// domainProtocolBridges holds a map of protocol prefixes to their protocolPortBridges.
+type domainProtocolBridges struct {
+	mu       sync.RWMutex
+	protocols map[string]*protocolPortBridges
+}
+
+// protocolPortBridges holds a map of public ports to their internal bridge addresses.
+type protocolPortBridges struct {
 	mu      sync.RWMutex
 	bridges map[uint32]string
 }
@@ -79,10 +85,15 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 	// And the domain-to-bridge mapping
 	// We need to iterate and delete all bridges for this domain
 	if v, ok := m.domainBridgeAddrs.Load(domain); ok {
-		dpb := v.(*domainPortBridges)
+		dpb := v.(*domainProtocolBridges)
 		dpb.mu.Lock()
-		for port := range dpb.bridges {
-			delete(dpb.bridges, port)
+		for protocolPrefix, ppb := range dpb.protocols {
+			ppb.mu.Lock()
+			for port := range ppb.bridges {
+				delete(ppb.bridges, port)
+			}
+			ppb.mu.Unlock()
+			delete(dpb.protocols, protocolPrefix)
 		}
 		dpb.mu.Unlock()
 		m.domainBridgeAddrs.Delete(domain)
@@ -154,50 +165,83 @@ func (m *Manager) DeleteDomainForwardedPort(domain string) {
 	}).Info("Removed domain forwarded port.")
 }
 
-// StoreBridgeAddress stores the internal bridge address for a domain and public port.
-func (m *Manager) StoreBridgeAddress(domain string, publicPort uint32, addr string) {
-	v, _ := m.domainBridgeAddrs.LoadOrStore(domain, &domainPortBridges{bridges: make(map[uint32]string)})
-	dpb := v.(*domainPortBridges)
+// StoreBridgeAddress stores the internal bridge address for a domain, protocol prefix, and public port.
+func (m *Manager) StoreBridgeAddress(domain, protocolPrefix string, publicPort uint32, addr string) {
+	v, _ := m.domainBridgeAddrs.LoadOrStore(domain, &domainProtocolBridges{protocols: make(map[string]*protocolPortBridges)})
+	dpb := v.(*domainProtocolBridges)
 	dpb.mu.Lock()
 	defer dpb.mu.Unlock()
-	dpb.bridges[publicPort] = addr
+
+	pv, _ := dpb.protocols[protocolPrefix]
+	if pv == nil {
+		pv = &protocolPortBridges{bridges: make(map[uint32]string)}
+		dpb.protocols[protocolPrefix] = pv
+	}
+	pv.mu.Lock()
+	defer pv.mu.Unlock()
+	pv.bridges[publicPort] = addr
 	logrus.WithFields(logrus.Fields{
-		"domain":      domain,
-		"public_port": publicPort,
-		"bridge_addr": addr,
-	}).Info("Stored bridge address for domain and port.")
+		"domain":          domain,
+		"protocol_prefix": protocolPrefix,
+		"public_port":     publicPort,
+		"bridge_addr":     addr,
+	}).Info("Stored bridge address for domain, protocol, and port.")
 }
 
-// LoadBridgeAddress loads the internal bridge address for a domain and public port.
-func (m *Manager) LoadBridgeAddress(domain string, publicPort uint32) (string, bool) {
+// LoadBridgeAddress loads the internal bridge address for a domain, protocol prefix, and public port.
+func (m *Manager) LoadBridgeAddress(domain, protocolPrefix string, publicPort uint32) (string, bool) {
 	v, ok := m.domainBridgeAddrs.Load(domain)
 	if !ok {
 		return "", false
 	}
-	dpb := v.(*domainPortBridges)
+	dpb := v.(*domainProtocolBridges)
 	dpb.mu.RLock()
 	defer dpb.mu.RUnlock()
-	addr, ok := dpb.bridges[publicPort]
+
+	pv, ok := dpb.protocols[protocolPrefix]
+	if !ok {
+		return "", false
+	}
+	pv.mu.RLock()
+	defer pv.mu.RUnlock()
+	addr, ok := pv.bridges[publicPort]
 	return addr, ok
 }
 
-// DeleteBridgeAddress deletes the internal bridge address for a domain and public port.
-func (m *Manager) DeleteBridgeAddress(domain string, publicPort uint32) {
+// DeleteBridgeAddress deletes the internal bridge address for a domain, protocol prefix, and public port.
+func (m *Manager) DeleteBridgeAddress(domain, protocolPrefix string, publicPort uint32) {
 	v, ok := m.domainBridgeAddrs.Load(domain)
 	if !ok {
 		return
 	}
-	dpb := v.(*domainPortBridges)
+	dpb := v.(*domainProtocolBridges)
 	dpb.mu.Lock()
 	defer dpb.mu.Unlock()
-	delete(dpb.bridges, publicPort)
-	logrus.WithFields(logrus.Fields{
-		"domain":      domain,
-		"public_port": publicPort,
-	}).Info("Removed bridge address for domain and port.")
 
-	// If no more bridges for this domain, remove the domain entry itself
-	if len(dpb.bridges) == 0 {
+	pv, ok := dpb.protocols[protocolPrefix]
+	if !ok {
+		return
+	}
+	pv.mu.Lock()
+	defer pv.mu.Unlock()
+	delete(pv.bridges, publicPort)
+	logrus.WithFields(logrus.Fields{
+		"domain":          domain,
+		"protocol_prefix": protocolPrefix,
+		"public_port":     publicPort,
+	}).Info("Removed bridge address for domain, protocol, and port.")
+
+	// If no more bridges for this protocol, remove the protocol entry itself
+	if len(pv.bridges) == 0 {
+		delete(dpb.protocols, protocolPrefix)
+		logrus.WithFields(logrus.Fields{
+			"domain":          domain,
+			"protocol_prefix": protocolPrefix,
+		}).Info("Removed all bridge addresses for protocol.")
+	}
+
+	// If no more protocols for this domain, remove the domain entry itself
+	if len(dpb.protocols) == 0 {
 		m.domainBridgeAddrs.Delete(domain)
 		logrus.WithField("domain", domain).Info("Removed all bridge addresses for domain.")
 	}
