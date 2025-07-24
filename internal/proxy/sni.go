@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"zcdns-tunnel/internal/tunnel"
-	
 
 	"github.com/sirupsen/logrus"
 )
@@ -98,7 +97,6 @@ func (p *SNIProxy) GetListenPort(timeout time.Duration) (uint32, error) {
 	}
 }
 
-// ListenAndServe starts the SNI proxy listener.
 func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 	logrus.Printf("Starting multiplexer proxy server on %s", p.ListenAddr)
 
@@ -111,17 +109,24 @@ func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 	p.listener = listener
 	p.listenerMu.Unlock()
 
-	defer func() {
+	// Use sync.Once to ensure cleanup happens only once
+	var closeOnce sync.Once
+	cleanup := func() {
 		p.listenerMu.Lock()
-		p.listener.Close()
-		p.listener = nil
-		p.listenerMu.Unlock()
-	}()
+		defer p.listenerMu.Unlock()
+		if p.listener != nil {
+			p.listener.Close()
+			p.listener = nil
+		}
+	}
 
+	defer closeOnce.Do(cleanup)
+
+	// Graceful shutdown goroutine
 	go func() {
 		<-ctx.Done()
 		logrus.Printf("Shutting down multiplexer proxy server on %s...", p.ListenAddr)
-		p.listener.Close()
+		closeOnce.Do(cleanup)
 	}()
 
 	for {
@@ -129,7 +134,7 @@ func (p *SNIProxy) ListenAndServe(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				return nil // Graceful shutdown.
+				return nil // Graceful shutdown
 			default:
 				if !isTemporary(err) {
 					logrus.WithFields(logrus.Fields{
@@ -416,8 +421,6 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 // handleHTTPConnection handles plain HTTP traffic by proxying.
 func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn, req *http.Request) {
 	defer clientConn.Close()
-
-	
 
 	domain := req.Host
 	var publicPort uint32 = 80 // default HTTP port
