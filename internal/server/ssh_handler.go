@@ -13,11 +13,11 @@ import (
 
 	"zcdns-tunnel/internal/auth"
 	"zcdns-tunnel/internal/config"
+	"zcdns-tunnel/internal/consistenthash"
+	"zcdns-tunnel/internal/gossip"
 	"zcdns-tunnel/internal/proxy"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
 	"zcdns-tunnel/internal/tunnel"
-	"zcdns-tunnel/internal/gossip"
-	"zcdns-tunnel/internal/consistenthash"
 )
 
 // forwarder represents an active TCP forward.
@@ -48,8 +48,8 @@ type SSHServer struct {
 	Manager *tunnel.Manager
 
 	// Distributed system components
-	GossipService *gossip.GossipService
-	ConsistentHash *consistenthash.Map
+	GossipService   *gossip.GossipService
+	ConsistentHash  *consistenthash.Map
 	LocalGossipAddr string // The local address of this node for consistent hashing
 
 	// For shared, public-facing listeners (0.0.0.0)
@@ -125,7 +125,6 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 
 	listener := NewSSHListener(s.Config.SshListenAddr, sshConfig)
 	return listener.ListenAndServe(ctx, s.handleSSHConnection)
-}
 }
 
 func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerConfig) {
@@ -250,9 +249,9 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 
 	if responsibleNode != s.LocalGossipAddr {
 		logrus.WithFields(logrus.Fields{
-			"domain":            domain,
-			"responsible_node":  responsibleNode,
-			"current_node":      s.LocalGossipAddr,
+			"domain":           domain,
+			"responsible_node": responsibleNode,
+			"current_node":     s.LocalGossipAddr,
 		}).Info("Domain is not handled by this node, forwarding request.")
 		// TODO: Implement actual forwarding of the SSH tcpip-forward request to the responsibleNode
 		// For now, we just deny the request as we cannot forward it.

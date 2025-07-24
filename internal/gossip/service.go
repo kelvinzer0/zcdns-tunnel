@@ -3,7 +3,6 @@ package gossip
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"net"
 	"sync"
@@ -233,7 +232,7 @@ func (gs *GossipService) propagateNewPeer(newPeerAddr string) {
 	defer gs.peersMu.RUnlock()
 
 	// Kirim ke beberapa peer acak
-	activePeers := gs.getActivePeerAddrs()
+	activePeers := gs.GetActivePeerAddrs()
 	rand.Shuffle(len(activePeers), func(i, j int) {
 		activePeers[i], activePeers[j] = activePeers[j], activePeers[i]
 	})
@@ -263,7 +262,7 @@ func (gs *GossipService) sendHeartbeats() {
 			return
 		case <-ticker.C:
 			gs.peersMu.RLock()
-			activePeers := gs.getActivePeerAddrs()
+			activePeers := gs.GetActivePeerAddrs()
 			gs.peersMu.RUnlock()
 
 			if len(activePeers) == 0 {

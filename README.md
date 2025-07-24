@@ -45,6 +45,23 @@ The server features a smart multiplexer that routes incoming traffic based on an
     *   It then uses the extracted domain, the detected protocol, and the public port to find the correct intermediary bridge address.
     *   The traffic is then seamlessly forwarded to your local service through the secure SSH tunnel.
 
+## Distributed Architecture (Experimental)
+
+This project is evolving towards a distributed architecture to handle a large number of tunnels across multiple server instances. This is achieved through:
+
+1.  **Gossip Protocol (Custom UDP Implementation):**
+    *   Each `zcdns-tunnel` server instance (node) participates in a custom UDP-based gossip protocol.
+    *   Nodes automatically discover each other, maintain a list of active peers, and detect node failures.
+    *   This provides a decentralized and fault-tolerant way to manage cluster membership without external dependencies like etcd or Consul.
+
+2.  **Consistent Hashing:**
+    *   A consistent hashing ring is maintained by each node, populated with the addresses of all active peers discovered via the gossip protocol.
+    *   When a client requests a `tcpip-forward` for a specific domain, the server uses consistent hashing to determine which node in the cluster is "responsible" for that domain.
+    *   If the current node is the responsible node, it proceeds to establish the tunnel.
+    *   **Note:** Currently, if a request arrives at a node that is *not* responsible for the domain, the request is denied. Future development will include inter-node communication (RPC) to forward these requests to the responsible node, enabling true load balancing and failover for tunnel establishment.
+
+This distributed design aims to provide horizontal scalability, allowing the system to handle millions of tunnels by simply adding more small, independent `zcdns-tunnel` nodes.
+
 ## Features
 
 *   **Stateless and "DB-less":** No database or server-side state to manage. All configuration is in DNS.
