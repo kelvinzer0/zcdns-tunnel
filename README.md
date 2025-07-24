@@ -10,9 +10,9 @@ The server features a smart multiplexer that routes incoming traffic based on an
 
 1.  **DNS Setup:**
     *   Create a **CNAME record** for your custom domain (e.g., `app.your-domain.com`) that points to the tunnel server's domain (e.g., `tunnel.my-server.com`).
-    *   Add a **TXT record** to your domain with your SSH public key:
+    *   Add a **TXT record** to a special challenge subdomain of your domain with your SSH public key. This is used for authentication.
         ```
-        zcdns-ssh-key=ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAQC...
+        _zcdns-challenge.your-domain.com. IN TXT "zcdns-ssh-key=ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAQC..."
         ```
 
 2.  **Client-Side: Create the Tunnel**
