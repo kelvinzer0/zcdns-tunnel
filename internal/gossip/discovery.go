@@ -104,3 +104,19 @@ func DiscoverPublicIP(ctx context.Context, seedPeers []string) (string, error) {
 
 	return "", fmt.Errorf("failed to discover public IP from any seed peer")
 }
+
+// GetLocalNonLoopbackIP returns the first non-loopback IPv4 address of the current machine.
+func GetLocalNonLoopbackIP() (net.IP, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil { // Check if it is IPv4
+				return ipnet.IP, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("no non-loopback IPv4 address found")
+}

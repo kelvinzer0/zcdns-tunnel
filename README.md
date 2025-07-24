@@ -62,6 +62,16 @@ This project is evolving towards a distributed architecture to handle a large nu
 
 This distributed design aims to provide horizontal scalability, allowing the system to handle millions of tunnels by simply adding more small, independent `zcdns-tunnel` nodes.
 
+### Bootstrapping the First Node
+
+When starting a new cluster, or if no other `zcdns-tunnel` nodes are running and reachable via your `validation_domain` DNS records, you need to use the `--bootstrap` flag for the very first node. This tells the node to determine its own public IP address locally, rather than asking another peer.
+
+```bash
+./zcdns-tunnel --config configs/server.yml --bootstrap
+```
+
+Once the first node is running, subsequent nodes can be started without the `--bootstrap` flag, and they will automatically discover the existing cluster via DNS and the gossip protocol.
+
 ## Features
 
 *   **Stateless and "DB-less":** No database or server-side state to manage. All configuration is in DNS.

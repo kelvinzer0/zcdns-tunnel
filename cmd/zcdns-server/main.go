@@ -26,6 +26,7 @@ func main() {
 
 	// Command line flag for the config file path
 	configPath := flag.String("config", "configs/server.yml", "path to the server config file")
+	bootstrap := flag.Bool("bootstrap", false, "Set to true for the first node in a new cluster to discover its own public IP")
 	flag.Parse()
 
 	// Load configuration
@@ -40,24 +41,35 @@ func main() {
 
 	// --- Gossip and Clustering Setup ---
 	var gossipService *gossip.GossipService
+	var publicAddr string
 
-	// 1. Discover seed peer IPs from DNS
-	logrus.Info("Discovering seed peer IPs from DNS...")
-	seedIPs, err := gossip.DiscoverPeerIPs(ctx, cfg.ValidationDomain)
-	if err != nil {
-		logrus.Fatalf("Could not discover seed peers, cannot start: %v", err)
-	}
+	if *bootstrap {
+		logrus.Info("Bootstrap mode enabled. Discovering local non-loopback IP...")
+		ip, err := gossip.GetLocalNonLoopbackIP()
+		if err != nil {
+			logrus.Fatalf("Failed to get local non-loopback IP in bootstrap mode: %v", err)
+		}
+		publicAddr = fmt.Sprintf("%s:%d", ip.String(), gossip.DefaultGossipPort)
+		logrus.Infof("Discovered local public address: %s", publicAddr)
+	} else {
+		// 1. Discover seed peer IPs from DNS
+		logrus.Info("Discovering seed peer IPs from DNS...")
+		seedIPs, err := gossip.DiscoverPeerIPs(ctx, cfg.ValidationDomain)
+		if err != nil {
+			logrus.Fatalf("Could not discover seed peers, cannot start: %v", err)
+		}
 
-	var seedPeers []string
-	for _, ip := range seedIPs {
-		seedPeers = append(seedPeers, fmt.Sprintf("%s:%d", ip.String(), gossip.DefaultGossipPort))
-	}
+		var seedPeers []string
+		for _, ip := range seedIPs {
+			seedPeers = append(seedPeers, fmt.Sprintf("%s:%d", ip.String(), gossip.DefaultGossipPort))
+		}
 
-	// 2. Discover our own public IP using a seed peer
-	logrus.Info("Discovering public IP...")
-	publicAddr, err := gossip.DiscoverPublicIP(ctx, seedPeers)
-	if err != nil {
-		logrus.Fatalf("Could not discover public IP, cannot start: %v", err)
+		// 2. Discover our own public IP using a seed peer
+		logrus.Info("Discovering public IP from seed peers...")
+		publicAddr, err = gossip.DiscoverPublicIP(ctx, seedPeers)
+		if err != nil {
+			logrus.Fatalf("Could not discover public IP, cannot start: %v", err)
+		}
 	}
 
 	// 3. Initialize and start the Gossip Service
