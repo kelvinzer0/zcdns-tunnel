@@ -200,7 +200,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-		// --- SHARED LISTENER (0.0.0.0) LOGIC ---
+	// --- SHARED LISTENER (0.0.0.0) LOGIC ---
 	if payload.BindAddr == "0.0.0.0" {
 		// For shared listeners, we create an intermediary TCP proxy for this specific client
 		// to bridge traffic from the main SNI proxy to this client's SSH connection.
@@ -231,13 +231,13 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		actualIntermediaryAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(intermedPort)))
 
 		// 3. Store the mapping from the client's domain to this new intermediary address.
-						protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
-	if !ok {
-		protocolPrefix = ""
-	}
+		protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
+		if !ok {
+			protocolPrefix = ""
+		}
 
-	// 3. Store the mapping from the client's domain, protocol prefix, and public port to this new intermediary address.
-	s.Manager.StoreBridgeAddress(domain, protocolPrefix, payload.BindPort, actualIntermediaryAddr)
+		// 3. Store the mapping from the client's domain, protocol prefix, and public port to this new intermediary address.
+		s.Manager.StoreBridgeAddress(domain, protocolPrefix, payload.BindPort, actualIntermediaryAddr)
 
 		// 4. Ensure the main public SNIProxy listener exists.
 		sniProxy, exists := s.sniListeners[publicListenAddr]
@@ -268,9 +268,9 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		s.sniListenerRefCounts[publicListenAddr]++
 
 		logrus.WithFields(logrus.Fields{
-			"domain":           domain,
-			"public_listen":  publicListenAddr,
-			"bridge_addr":      actualIntermediaryAddr,
+			"domain":        domain,
+			"public_listen": publicListenAddr,
+			"bridge_addr":   actualIntermediaryAddr,
 		}).Info("Client registered for shared port via intermediary bridge")
 
 		// 6. Confirm the forward and return the public port to the client.
@@ -281,14 +281,14 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 			s.sniListenerRefCounts[publicListenAddr]--
 			intermedCancel()
 			delete(s.tcpListeners, actualIntermediaryAddr)
-							protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
-	if !ok {
-		protocolPrefix = ""
-	}
+			protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
+			if !ok {
+				protocolPrefix = ""
+			}
 
-	// ... (rest of the function)
+			// ... (rest of the function)
 
-				s.Manager.DeleteBridgeAddress(domain, protocolPrefix, payload.BindPort)
+			s.Manager.DeleteBridgeAddress(domain, protocolPrefix, payload.BindPort)
 			req.Reply(false, nil)
 			return
 		}
@@ -307,7 +307,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		return
 	}
 
-			tcpProxy := proxy.NewTCPProxy(publicListenAddr, payload.BindPort, sshConn)
+	tcpProxy := proxy.NewTCPProxy(publicListenAddr, payload.BindPort, sshConn)
 	listenerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
