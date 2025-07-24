@@ -5,12 +5,14 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/sirupsen/logrus"
 
 	"zcdns-tunnel/internal/config"
 	"zcdns-tunnel/internal/server"
+	"zcdns-tunnel/internal/gossip"
 )
 
 func main() {
@@ -23,6 +25,9 @@ func main() {
 
 	// Command line flag for the config file path
 	configPath := flag.String("config", "configs/server.example.yml", "path to the server config file")
+	// Add flags for gossip
+	gossipAddr := flag.String("gossip-addr", "0.0.0.0:7946", "Local address for gossip communication (UDP)")
+	seedPeers := flag.String("seed-peers", "", "Comma-separated list of seed peer addresses (IP:Port) for gossip")
 	flag.Parse()
 
 	// Load configuration
@@ -31,11 +36,24 @@ func main() {
 		logrus.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Initialize and start Gossip Service
+	gossipService := gossip.NewGossipService(*gossipAddr)
+	if err := gossipService.Start(); err != nil {
+		logrus.Fatalf("Failed to start gossip service: %v", err)
+	}
+	defer gossipService.Stop()
+
+	// If there are seed peers, try to join the cluster
+	if *seedPeers != "" {
+		peers := splitAndTrim(*seedPeers)
+		gossipService.Join(peers)
+	}
+
 	// Create a context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create and start the SSH server
-	sshServer := server.NewSSHServer(cfg)
+	sshServer := server.NewSSHServer(cfg, gossipService, *gossipAddr)
 	go func() {
 		if err := sshServer.StartSSHServer(ctx); err != nil {
 			logrus.Printf("SSH server exited with error: %v", err)
@@ -52,4 +70,15 @@ func main() {
 	cancel() // Tell goroutines to stop
 
 	logrus.Println("Server exited.")
+}
+
+func splitAndTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
 }

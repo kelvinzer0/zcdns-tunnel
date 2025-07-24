@@ -16,6 +16,8 @@ import (
 	"zcdns-tunnel/internal/proxy"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
 	"zcdns-tunnel/internal/tunnel"
+	"zcdns-tunnel/internal/gossip"
+	"zcdns-tunnel/internal/consistenthash"
 )
 
 // forwarder represents an active TCP forward.
@@ -45,6 +47,11 @@ type SSHServer struct {
 	Config  config.ServerConfig
 	Manager *tunnel.Manager
 
+	// Distributed system components
+	GossipService *gossip.GossipService
+	ConsistentHash *consistenthash.Map
+	LocalGossipAddr string // The local address of this node for consistent hashing
+
 	// For shared, public-facing listeners (0.0.0.0)
 	sniListeners         map[string]*proxy.SNIProxy
 	sniListenerRefCounts map[string]int
@@ -58,10 +65,13 @@ type SSHServer struct {
 }
 
 // NewSSHServer creates a new SSH server instance.
-func NewSSHServer(cfg config.ServerConfig) *SSHServer {
+func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossipAddr string) *SSHServer {
 	return &SSHServer{
 		Config:               cfg,
 		Manager:              tunnel.NewManager(),
+		GossipService:        gs,
+		ConsistentHash:       consistenthash.New(100, nil), // 100 virtual nodes per real node
+		LocalGossipAddr:      localGossipAddr,
 		sniListeners:         make(map[string]*proxy.SNIProxy),
 		sniListenerRefCounts: make(map[string]int),
 		sniListenerCancel:    make(map[string]context.CancelFunc),
@@ -84,8 +94,38 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	}
 	sshConfig.AddHostKey(hostSigner)
 
+	go func() {
+		for range s.GossipService.PeerUpdateChan {
+			logrus.Debug("Peer list updated, rebuilding consistent hash ring.")
+			s.mu.Lock()
+			// Clear existing nodes
+			s.ConsistentHash = consistenthash.New(100, nil) // Re-initialize to clear
+			// Add active peers
+			activePeers := s.GossipService.GetActivePeerAddrs()
+			if len(activePeers) > 0 {
+				s.ConsistentHash.Add(activePeers...)
+				logrus.Debugf("Consistent hash ring rebuilt with %d active peers.", len(activePeers))
+			} else {
+				logrus.Warn("Consistent hash ring is empty, no active peers.")
+			}
+			s.mu.Unlock()
+		}
+	}()
+
+	// Initial build of the consistent hash ring
+	s.mu.Lock()
+	activePeers := s.GossipService.GetActivePeerAddrs()
+	if len(activePeers) > 0 {
+		s.ConsistentHash.Add(activePeers...)
+		logrus.Debugf("Initial consistent hash ring built with %d active peers.", len(activePeers))
+	} else {
+		logrus.Warn("Initial consistent hash ring is empty, no active peers.")
+	}
+	s.mu.Unlock()
+
 	listener := NewSSHListener(s.Config.SshListenAddr, sshConfig)
 	return listener.ListenAndServe(ctx, s.handleSSHConnection)
+}
 }
 
 func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerConfig) {
@@ -196,6 +236,31 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		"listen_addr": publicListenAddr,
 		"domain":      domain,
 	}).Info("Received tcpip-forward request")
+
+	// Determine which node is responsible for this domain using Consistent Hashing
+	responsibleNode := s.ConsistentHash.Get(domain)
+
+	if responsibleNode == "" {
+		logrus.WithFields(logrus.Fields{
+			"domain": domain,
+		}).Error("No responsible node found for domain in consistent hash ring.")
+		req.Reply(false, nil)
+		return
+	}
+
+	if responsibleNode != s.LocalGossipAddr {
+		logrus.WithFields(logrus.Fields{
+			"domain":            domain,
+			"responsible_node":  responsibleNode,
+			"current_node":      s.LocalGossipAddr,
+		}).Info("Domain is not handled by this node, forwarding request.")
+		// TODO: Implement actual forwarding of the SSH tcpip-forward request to the responsibleNode
+		// For now, we just deny the request as we cannot forward it.
+		req.Reply(false, nil)
+		return
+	}
+
+	// If we reach here, this node is responsible for the domain.
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
