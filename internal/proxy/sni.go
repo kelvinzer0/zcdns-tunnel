@@ -436,28 +436,39 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 	}
 
 	domain := req.Host
+	var publicPort uint32 = 80 // default HTTP port
+
 	if strings.Contains(domain, ":") {
-		domain = strings.Split(domain, ":")[0]
+		parts := strings.Split(domain, ":")
+		domain = parts[0]
+
+		// Parse port from req.Host
+		if len(parts) > 1 {
+			port, err := strconv.ParseUint(parts[1], 10, 32)
+			if err != nil {
+				logrus.WithField("req_host", req.Host).WithError(err).Error("Failed to parse port from request host")
+				return
+			}
+			publicPort = uint32(port)
+		}
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"domain":      domain,
+		"port":        publicPort,
 		"source_ip":   clientConn.RemoteAddr(),
 		"request_uri": req.RequestURI,
 		"proxy_type":  "HTTP",
 	}).Info("Identified HTTP request")
 
-	publicPort, err := strconv.ParseUint(strings.Split(p.ListenAddr, ":")[1], 10, 32)
-	if err != nil {
-		logrus.WithField("listen_addr", p.ListenAddr).WithError(err).Error("Failed to parse listen address port")
-		return
-	}
-
 	protocolPrefix := "http"
 
-	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain, protocolPrefix, uint32(publicPort))
+	bridgeAddr, ok := p.Manager.LoadBridgeAddress(domain, protocolPrefix, publicPort)
 	if !ok {
-		logrus.WithFields(logrus.Fields{"domain": domain}).Error("Bridge for domain not found during HTTP routing")
+		logrus.WithFields(logrus.Fields{
+			"domain": domain,
+			"port":   publicPort,
+		}).Error("Bridge for domain not found during HTTP routing")
 		// Optional: could write a 404 response to the client here
 		return
 	}
@@ -478,8 +489,7 @@ func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
 		return
 	}
 
-	// After writing the request, proxy the rest of the data (e.g., response from server)
-	// between the client and the bridge.
+	// After writing the request, including the body, to the bridge.
 	proxyData(clientConn, backendConn)
 }
 
