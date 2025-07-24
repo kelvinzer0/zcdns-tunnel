@@ -172,8 +172,8 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 
 	// Priority 2: Handle HTTP traffic
 	// We need to peek more to identify HTTP methods
-	peeked, err = prefixedConn.r.Peek(8)
-	if err != nil {
+	peeked, err = prefixedConn.r.Peek(1024) // Peek up to 1KB for HTTP header
+	if err != nil && err != io.EOF {
 		// Not enough data for an HTTP request, treat as generic TCP
 		p.handleDefaultTCPConnection(prefixedConn)
 		return
