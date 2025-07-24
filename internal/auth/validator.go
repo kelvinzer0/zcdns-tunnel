@@ -54,13 +54,20 @@ func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey
 	}
 
 	// TXT record for public key
-	txtRecords, err := net.LookupTXT(domain)
+	challengeDomain := "_zcdns-challenge." + domain
+	logrus.WithFields(logrus.Fields{
+		"remote_addr": remoteAddr,
+		"domain":      domain,
+		"txt_lookup_domain": challengeDomain,
+	}).Info("Auth: Attempting TXT record lookup for challenge")
+	txtRecords, err := net.LookupTXT(challengeDomain)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr":   remoteAddr,
 			"domain":        domain,
 			logrus.ErrorKey: err,
-		}).Warn("Auth: Failed to lookup TXT record for domain")
+		"txt_lookup_domain": challengeDomain,
+		}).Warn("Auth: Failed to lookup TXT record for challenge domain")
 		return fmt.Errorf("failed to lookup TXT record")
 	}
 
@@ -73,7 +80,8 @@ func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey
 					logrus.WithFields(logrus.Fields{
 						"remote_addr":   remoteAddr,
 						"domain":        domain,
-						logrus.ErrorKey: err,
+						"txt_record_prefix": "zcdns-ssh-key=",
+						"txt_lookup_domain": challengeDomain,
 					}).Warn("Auth: Failed to parse public key from TXT record")
 					continue
 				}
@@ -81,6 +89,7 @@ func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey
 					logrus.WithFields(logrus.Fields{
 						"remote_addr": remoteAddr,
 						"domain":      domain,
+					"txt_lookup_domain": challengeDomain,
 					}).Info("Auth: Public key authenticated successfully")
 					return nil
 				}
