@@ -172,24 +172,16 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 		return
 	}
 
-	// Priority 2: Handle HTTP traffic
-	// Try to read the first line to identify HTTP
-	// Read first chunk for analysis
-	buf := make([]byte, 32) // Enough for most HTTP request lines
-	n, err := prefixedConn.r.Read(buf)
-	if err != nil && err != io.EOF {
-		logrus.WithField("remote_addr", prefixedConn.RemoteAddr()).WithError(err).Warn("Failed to read for protocol detection")
-		p.handleDefaultTCPConnection(prefixedConn)
+	// Priority 2: Attempt to parse as HTTP
+	// http.ReadRequest will consume from prefixedConn.r
+	req, err := http.ReadRequest(prefixedConn.r)
+	if err == nil {
+		// Successfully parsed as HTTP
+		p.handleHTTPConnection(prefixedConn, req)
 		return
-	}
-
-	// Prepend read data back
-	prefixedConn.Prepend(buf[:n])
-
-	// Fast state machine detection
-	if utils.IsHTTPRequestFast(buf[:n]) {
-		p.handleHTTPConnection(prefixedConn)
-		return
+	} else if err != io.EOF {
+		// Log error if it's not just EOF (e.g., malformed HTTP)
+		logrus.WithField("remote_addr", prefixedConn.RemoteAddr()).WithError(err).Debug("Failed to parse as HTTP, falling back to TCP.")
 	}
 
 	p.handleDefaultTCPConnection(prefixedConn)
@@ -422,18 +414,10 @@ func (p *SNIProxy) handleTLSConnection(clientConn net.Conn) {
 }
 
 // handleHTTPConnection handles plain HTTP traffic by proxying.
-func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn) {
+func (p *SNIProxy) handleHTTPConnection(clientConn net.Conn, req *http.Request) {
 	defer clientConn.Close()
 
-	// The clientConn is already a prefixedConn, so its reader has the peeked data.
-	buffReader := clientConn.(*prefixedConn).r
-	req, err := http.ReadRequest(buffReader)
-	if err != nil {
-		logrus.WithField("remote_addr", clientConn.RemoteAddr()).WithError(err).Warn("Failed to read HTTP request")
-		// Fallback to default TCP handler if reading fails
-		p.handleDefaultTCPConnection(clientConn)
-		return
-	}
+	
 
 	domain := req.Host
 	var publicPort uint32 = 80 // default HTTP port
