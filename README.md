@@ -66,8 +66,10 @@ This distributed design aims to provide horizontal scalability, allowing the sys
 
 When starting a new cluster, or if no other `zcdns-tunnel` nodes are running and reachable via your `validation_domain` DNS records, you need to use the `--bootstrap` flag for the very first node. This tells the node to determine its own public IP address locally, rather than asking another peer.
 
+For cloud deployments where the local IP might be a private IP, you can explicitly specify the public IP using the `--public-ip` flag:
+
 ```bash
-./zcdns-tunnel --config configs/server.yml --bootstrap
+./zcdns-tunnel --config configs/server.yml --bootstrap --public-ip <YOUR_PUBLIC_IP>
 ```
 
 Once the first node is running, subsequent nodes can be started without the `--bootstrap` flag, and they will automatically discover the existing cluster via DNS and the gossip protocol.

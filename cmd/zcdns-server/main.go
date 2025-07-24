@@ -26,7 +26,8 @@ func main() {
 
 	// Command line flag for the config file path
 	configPath := flag.String("config", "configs/server.yml", "path to the server config file")
-	bootstrap := flag.Bool("bootstrap", false, "Set to true for the first node in a new cluster to discover its own public IP")
+	bootstrap := flag.Bool("bootstrap", false, "Set to true for the first node in a new cluster to determine its own public IP")
+	publicIP := flag.String("public-ip", "", "Manually specify the public IP address of this node (e.g., 203.0.113.42). Required in bootstrap mode if local IP is not public.")
 	flag.Parse()
 
 	// Load configuration
@@ -44,13 +45,18 @@ func main() {
 	var publicAddr string
 
 	if *bootstrap {
-		logrus.Info("Bootstrap mode enabled. Discovering local non-loopback IP...")
-		ip, err := gossip.GetLocalNonLoopbackIP()
-		if err != nil {
-			logrus.Fatalf("Failed to get local non-loopback IP in bootstrap mode: %v", err)
+		if *publicIP != "" {
+			publicAddr = fmt.Sprintf("%s:%d", *publicIP, gossip.DefaultGossipPort)
+			logrus.Infof("Bootstrap mode enabled. Using manually specified public address: %s", publicAddr)
+		} else {
+			logrus.Info("Bootstrap mode enabled. Discovering local non-loopback IP...")
+			ip, err := gossip.GetLocalNonLoopbackIP()
+			if err != nil {
+				logrus.Fatalf("Failed to get local non-loopback IP in bootstrap mode: %v", err)
+			}
+			publicAddr = fmt.Sprintf("%s:%d", ip.String(), gossip.DefaultGossipPort)
+			logrus.Infof("Discovered local public address: %s", publicAddr)
 		}
-		publicAddr = fmt.Sprintf("%s:%d", ip.String(), gossip.DefaultGossipPort)
-		logrus.Infof("Discovered local public address: %s", publicAddr)
 	} else {
 		// 1. Discover seed peer IPs from DNS
 		logrus.Info("Discovering seed peer IPs from DNS...")
