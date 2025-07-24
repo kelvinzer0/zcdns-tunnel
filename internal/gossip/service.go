@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -8,19 +9,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus" // Menggunakan logrus untuk logging
+	"github.com/sirupsen/logrus"
+	"zcdns-tunnel/internal/config"
 )
 
 const (
-	heartbeatInterval = 5 * time.Second
-	peerTimeout       = 15 * time.Second // Jika peer tidak terlihat selama ini, anggap mati
-	syncInterval      = 30 * time.Second // Interval untuk sinkronisasi daftar peer
-	maxPeersToSend    = 5                // Maksimum peer yang dikirim dalam heartbeat/sync
+	// DefaultGossipPort adalah port standar untuk komunikasi gosip.
+	DefaultGossipPort = 7946
+	maxPeersToSend    = 5 // Maksimum peer yang dikirim dalam heartbeat/sync
 )
+
+// Config menampung konfigurasi untuk GossipService.
+type Config struct {
+	ListenAddr       string
+	ValidationDomain string
+	ProbeInterval    time.Duration
+	ProbeTimeout     time.Duration
+}
 
 // GossipService mengelola keanggotaan klaster menggunakan protokol gossip.
 type GossipService struct {
-	LocalAddr string // Alamat IP:Port lokal dari node ini
+	config    Config
+	localAddr string // Alamat IP:Port lokal dari node ini
 
 	peersMu sync.RWMutex
 	peers   map[string]*Peer // map[Addr]Peer
@@ -34,18 +44,35 @@ type GossipService struct {
 }
 
 // NewGossipService membuat instance GossipService baru.
-func NewGossipService(localAddr string) *GossipService {
+func NewGossipService(cfg config.GossipConfig, validationDomain, publicAddr string) (*GossipService, error) {
+	probeInterval, err := time.ParseDuration(cfg.ProbeInterval)
+	if err != nil {
+		return nil, fmt.Errorf("invalid probe_interval: %w", err)
+	}
+	probeTimeout, err := time.ParseDuration(cfg.ProbeTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("invalid probe_timeout: %w", err)
+	}
+
+	listenAddr := fmt.Sprintf(":%d", DefaultGossipPort)
+
 	return &GossipService{
-		LocalAddr: localAddr,
+		config: Config{
+			ListenAddr:       listenAddr,
+			ValidationDomain: validationDomain,
+			ProbeInterval:    probeInterval,
+			ProbeTimeout:     probeTimeout,
+		},
+		localAddr: publicAddr, // Menggunakan alamat publik yang ditemukan
 		peers:     make(map[string]*Peer),
 		stopChan:  make(chan struct{}),
 		PeerUpdateChan: make(chan struct{}, 1), // Buffered channel
-	}
+	}, nil
 }
 
-// Start memulai layanan gossip.
-func (gs *GossipService) Start() error {
-	addr, err := net.ResolveUDPAddr("udp", gs.LocalAddr)
+// Start memulai layanan gossip, menemukan rekan, dan bergabung dengan klaster.
+func (gs *GossipService) Start(ctx context.Context) error {
+	addr, err := net.ResolveUDPAddr("udp", gs.config.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
@@ -55,11 +82,11 @@ func (gs *GossipService) Start() error {
 		return fmt.Errorf("failed to listen UDP: %w", err)
 	}
 	gs.conn = conn
-	logrus.Infof("Gossip service listening on %s", gs.LocalAddr)
+	logrus.Infof("Gossip service listening on %s, announcing as %s", gs.config.ListenAddr, gs.localAddr)
 
 	// Tambahkan diri sendiri ke daftar peer
 	gs.peersMu.Lock()
-	gs.peers[gs.LocalAddr] = NewPeer(gs.LocalAddr)
+	gs.peers[gs.localAddr] = NewPeer(gs.localAddr)
 	gs.peersMu.Unlock()
 
 	gs.wg.Add(3)
@@ -67,30 +94,74 @@ func (gs *GossipService) Start() error {
 	go gs.sendHeartbeats()
 	go gs.checkPeerStatus()
 
+	// Temukan dan gabung dengan klaster
+	go gs.discoverAndJoin(ctx)
+
 	return nil
+}
+
+// discoverAndJoin secara berkala mencoba menemukan rekan dan bergabung dengan klaster.
+func (gs *GossipService) discoverAndJoin(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second) // Coba lagi setiap 15 detik jika gagal
+	defer ticker.Stop()
+
+	// Coba segera saat startup
+	gs.attemptJoin(ctx)
+
+	for {
+		select {
+		case <-gs.stopChan:
+			return
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			gs.attemptJoin(ctx)
+		}
+	}
+}
+
+func (gs *GossipService) attemptJoin(ctx context.Context) {
+	// Jika kita sudah memiliki rekan selain diri sendiri, kita mungkin sudah terhubung.
+	if gs.GetPeerCount() > 1 {
+		return
+	}
+
+	logrus.Infof("Discovering peer IPs from validation domain: %s", gs.config.ValidationDomain)
+	seedIPs, err := DiscoverPeerIPs(ctx, gs.config.ValidationDomain)
+	if err != nil {
+		logrus.Warnf("Failed to discover seed peers: %v", err)
+		return
+	}
+
+	var seedPeers []string
+	for _, ip := range seedIPs {
+		seedPeers = append(seedPeers, fmt.Sprintf("%s:%d", ip.String(), DefaultGossipPort))
+	}
+
+	gs.join(seedPeers)
 }
 
 // Stop menghentikan layanan gossip.
 func (gs *GossipService) Stop() {
 	logrus.Info("Stopping gossip service...")
 	close(gs.stopChan)
-	gs.conn.Close() // Menutup koneksi UDP akan menghentikan listenForMessages
+	gs.conn.Close()
 	gs.wg.Wait()
 	logrus.Info("Gossip service stopped.")
 }
 
-// Join mencoba bergabung dengan klaster menggunakan seed peers.
-func (gs *GossipService) Join(seedPeers []string) {
-	joinPayload, _ := json.Marshal(JoinPayload{NewPeer: gs.LocalAddr})
+// join mencoba bergabung dengan klaster menggunakan seed peers.
+func (gs *GossipService) join(seedPeers []string) {
+	joinPayload, _ := json.Marshal(JoinPayload{NewPeer: gs.localAddr})
 	msg := GossipMessage{
 		Type:    MessageTypeJoin,
-		Sender:  gs.LocalAddr,
+		Sender:  gs.localAddr,
 		Payload: joinPayload,
 	}
 	msgBytes, _ := json.Marshal(msg)
 
 	for _, seed := range seedPeers {
-		if seed == gs.LocalAddr {
+		if seed == gs.localAddr {
 			continue
 		}
 		logrus.Debugf("Attempting to join cluster via seed peer: %s", seed)
@@ -139,23 +210,19 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 		return
 	}
 
-	// Perbarui status pengirim (jika belum ada, tambahkan)
-	gs.peersMu.Lock()
-	if peer, ok := gs.peers[msg.Sender]; ok {
-		peer.UpdateLastSeen()
-	} else {
-		logrus.Infof("Discovered new peer: %s", msg.Sender)
-		gs.peers[msg.Sender] = NewPeer(msg.Sender)
-		// Propagasi penemuan peer baru ke peer lain
-		go gs.propagateNewPeer(msg.Sender)
-		select {
-		case gs.PeerUpdateChan <- struct{}{}:
-		default:
-		}
-	}
-	gs.peersMu.Unlock()
-
 	switch msg.Type {
+	case MessageTypeWhoAmI:
+		logrus.Debugf("Received WhoAmI from %s", remoteAddr.String())
+		payload, _ := json.Marshal(WhoAmIResponsePayload{PublicAddr: remoteAddr.String()})
+		respMsg := GossipMessage{
+			Type:    MessageTypeWhoAmIResponse,
+			Sender:  gs.localAddr,
+			Payload: payload,
+		}
+		respBytes, _ := json.Marshal(respMsg)
+		gs.sendMessage(respBytes, remoteAddr.String())
+		return // Tidak perlu proses lebih lanjut untuk pesan ini
+
 	case MessageTypeJoin:
 		var payload JoinPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -163,16 +230,7 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 			return
 		}
 		logrus.Infof("Received JOIN from %s (new peer: %s)", msg.Sender, payload.NewPeer)
-		// Pastikan payload.NewPeer juga ditambahkan/diperbarui
-		gs.peersMu.Lock()
-		if peer, ok := gs.peers[payload.NewPeer]; ok {
-			peer.UpdateLastSeen()
-		} else {
-			logrus.Infof("Discovered new peer from JOIN payload: %s", payload.NewPeer)
-			gs.peers[payload.NewPeer] = NewPeer(payload.NewPeer)
-			go gs.propagateNewPeer(payload.NewPeer)
-		}
-		gs.peersMu.Unlock()
+		gs.updatePeer(payload.NewPeer)
 
 	case MessageTypeHeartbeat:
 		var payload HeartbeatPayload
@@ -181,20 +239,9 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 			return
 		}
 		logrus.Debugf("Received HEARTBEAT from %s. Known peers in payload: %v", msg.Sender, payload.KnownPeers)
-		// Update local peer list based on known peers from heartbeat
-		gs.peersMu.Lock()
 		for _, knownPeerAddr := range payload.KnownPeers {
-			if _, ok := gs.peers[knownPeerAddr]; !ok {
-				logrus.Infof("Discovered new peer from HEARTBEAT payload: %s", knownPeerAddr)
-				gs.peers[knownPeerAddr] = NewPeer(knownPeerAddr)
-				go gs.propagateNewPeer(knownPeerAddr)
-				select {
-				case gs.PeerUpdateChan <- struct{}{}:
-				default:
-				}
-			}
+			gs.updatePeer(knownPeerAddr)
 		}
-		gs.peersMu.Unlock()
 
 	case MessageTypeSync:
 		var payload SyncPayload
@@ -203,18 +250,37 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 			return
 		}
 		logrus.Debugf("Received SYNC from %s. Full peer list: %v", msg.Sender, payload.Peers)
-		gs.peersMu.Lock()
 		for _, syncPeerAddr := range payload.Peers {
-			if _, ok := gs.peers[syncPeerAddr]; !ok {
-				logrus.Infof("Discovered new peer from SYNC payload: %s", syncPeerAddr)
-				gs.peers[syncPeerAddr] = NewPeer(syncPeerAddr)
-				go gs.propagateNewPeer(syncPeerAddr)
-			}
+			gs.updatePeer(syncPeerAddr)
 		}
-		gs.peersMu.Unlock()
 
 	default:
-		logrus.Warnf("Received unknown gossip message type: %s from %s", msg.Type, remoteAddr.String())
+		logrus.Warnf("Received unknown gossip message type: '%s' from %s", msg.Type, remoteAddr.String())
+	}
+
+	// Perbarui status pengirim
+	gs.updatePeer(msg.Sender)
+}
+
+// updatePeer menambahkan atau memperbarui peer dalam daftar.
+func (gs *GossipService) updatePeer(peerAddr string) {
+	if peerAddr == "" || peerAddr == gs.localAddr {
+		return
+	}
+
+	gs.peersMu.Lock()
+	defer gs.peersMu.Unlock()
+
+	if peer, ok := gs.peers[peerAddr]; ok {
+		peer.UpdateLastSeen()
+	} else {
+		logrus.Infof("Discovered new peer: %s", peerAddr)
+		gs.peers[peerAddr] = NewPeer(peerAddr)
+		go gs.propagateNewPeer(peerAddr)
+		select {
+		case gs.PeerUpdateChan <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -223,37 +289,22 @@ func (gs *GossipService) propagateNewPeer(newPeerAddr string) {
 	joinPayload, _ := json.Marshal(JoinPayload{NewPeer: newPeerAddr})
 	msg := GossipMessage{
 		Type:    MessageTypeJoin,
-		Sender:  gs.LocalAddr,
+		Sender:  gs.localAddr,
 		Payload: joinPayload,
 	}
 	msgBytes, _ := json.Marshal(msg)
 
-	gs.peersMu.RLock()
-	defer gs.peersMu.RUnlock()
-
 	// Kirim ke beberapa peer acak
-	activePeers := gs.GetActivePeerAddrs()
-	rand.Shuffle(len(activePeers), func(i, j int) {
-		activePeers[i], activePeers[j] = activePeers[j], activePeers[i]
-	})
-
-	count := 0
-	for _, peerAddr := range activePeers {
-		if peerAddr == gs.LocalAddr || peerAddr == newPeerAddr {
-			continue
-		}
+	targets := gs.GetRandomPeers(maxPeersToSend, false)
+	for _, peerAddr := range targets {
 		go gs.sendMessage(msgBytes, peerAddr)
-		count++
-		if count >= maxPeersToSend { // Batasi propagasi untuk menghindari banjir
-			break
-		}
 	}
 }
 
 // sendHeartbeats secara berkala mengirim heartbeat ke peer acak.
 func (gs *GossipService) sendHeartbeats() {
 	defer gs.wg.Done()
-	ticker := time.NewTicker(heartbeatInterval)
+	ticker := time.NewTicker(gs.config.ProbeInterval)
 	defer ticker.Stop()
 
 	for {
@@ -261,49 +312,22 @@ func (gs *GossipService) sendHeartbeats() {
 		case <-gs.stopChan:
 			return
 		case <-ticker.C:
-			gs.peersMu.RLock()
-			activePeers := gs.GetActivePeerAddrs()
-			gs.peersMu.RUnlock()
-
-			if len(activePeers) == 0 {
-				logrus.Debug("No active peers to send heartbeats to.")
+			if gs.GetPeerCount() <= 1 {
 				continue
 			}
 
-			// Ambil subset peer untuk dikirim dalam heartbeat
-			knownPeersInPayload := []string{}
-			rand.Shuffle(len(activePeers), func(i, j int) {
-				activePeers[i], activePeers[j] = activePeers[j], activePeers[i]
-			})
-			for i, peerAddr := range activePeers {
-				if i >= maxPeersToSend {
-					break
-				}
-				knownPeersInPayload = append(knownPeersInPayload, peerAddr)
-			}
-
-			heartbeatPayload, _ := json.Marshal(HeartbeatPayload{KnownPeers: knownPeersInPayload})
+			heartbeatPayload, _ := json.Marshal(HeartbeatPayload{KnownPeers: gs.GetRandomPeers(maxPeersToSend, true)})
 			msg := GossipMessage{
 				Type:    MessageTypeHeartbeat,
-				Sender:  gs.LocalAddr,
+				Sender:  gs.localAddr,
 				Payload: heartbeatPayload,
 			}
 			msgBytes, _ := json.Marshal(msg)
 
 			// Kirim heartbeat ke beberapa peer acak
-			rand.Shuffle(len(activePeers), func(i, j int) {
-				activePeers[i], activePeers[j] = activePeers[j], activePeers[i]
-			})
-			count := 0
-			for _, peerAddr := range activePeers {
-				if peerAddr == gs.LocalAddr {
-					continue
-				}
-				go gs.sendMessage(msgBytes, peerAddr)
-				count++
-				if count >= maxPeersToSend {
-					break
-				}
+			targets := gs.GetRandomPeers(maxPeersToSend, false)
+			for _, target := range targets {
+				go gs.sendMessage(msgBytes, target)
 			}
 		}
 	}
@@ -312,7 +336,7 @@ func (gs *GossipService) sendHeartbeats() {
 // checkPeerStatus secara berkala memeriksa peer yang mati.
 func (gs *GossipService) checkPeerStatus() {
 	defer gs.wg.Done()
-	ticker := time.NewTicker(heartbeatInterval) // Periksa sesering heartbeat
+	ticker := time.NewTicker(gs.config.ProbeInterval) // Periksa sesering heartbeat
 	defer ticker.Stop()
 
 	for {
@@ -320,23 +344,28 @@ func (gs *GossipService) checkPeerStatus() {
 		case <-gs.stopChan:
 			return
 		case <-ticker.C:
+			var deadPeers []string
 			gs.peersMu.Lock()
 			for addr, peer := range gs.peers {
-				if addr == gs.LocalAddr {
+				if addr == gs.localAddr {
 					continue
 				}
-				lastSeen, isAlive := peer.GetStatus()
-				if isAlive && time.Since(lastSeen) > peerTimeout {
-					peer.MarkDead()
-					logrus.Warnf("Peer %s detected as dead (last seen %s ago)", addr, time.Since(lastSeen))
-					select {
-					case gs.PeerUpdateChan <- struct{}{}:
-					default:
-					}
-					// TODO: Propagate "leave" message or more robust failure detection
+				if time.Since(peer.LastSeen) > gs.config.ProbeTimeout {
+					deadPeers = append(deadPeers, addr)
 				}
 			}
+			for _, addr := range deadPeers {
+				logrus.Warnf("Peer %s detected as dead (last seen %s ago)", addr, time.Since(gs.peers[addr].LastSeen).Round(time.Second))
+				delete(gs.peers, addr)
+			}
 			gs.peersMu.Unlock()
+
+			if len(deadPeers) > 0 {
+				select {
+				case gs.PeerUpdateChan <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }
@@ -347,12 +376,34 @@ func (gs *GossipService) GetActivePeerAddrs() []string {
 	defer gs.peersMu.RUnlock()
 
 	var active []string
-	for addr, peer := range gs.peers {
-		if peer.IsAlive {
-			active = append(active, addr)
-		}
+	for addr := range gs.peers {
+		active = append(active, addr)
 	}
 	return active
+}
+
+// GetRandomPeers mengembalikan slice acak dari peer yang aktif.
+func (gs *GossipService) GetRandomPeers(count int, includeSelf bool) []string {
+	activePeers := gs.GetActivePeerAddrs()
+
+	if !includeSelf {
+		// Hapus diri sendiri dari daftar
+		for i, addr := range activePeers {
+			if addr == gs.localAddr {
+				activePeers = append(activePeers[:i], activePeers[i+1:]...)
+				break
+			}
+		}
+	}
+
+	rand.Shuffle(len(activePeers), func(i, j int) {
+		activePeers[i], activePeers[j] = activePeers[j], activePeers[i]
+	})
+
+	if len(activePeers) <= count {
+		return activePeers
+	}
+	return activePeers[:count]
 }
 
 // GetPeerCount mengembalikan jumlah peer yang diketahui (termasuk diri sendiri).

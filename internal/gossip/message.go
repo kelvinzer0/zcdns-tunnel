@@ -4,9 +4,13 @@ package gossip
 type MessageType string
 
 const (
-	MessageTypeJoin     MessageType = "join"
+	MessageTypeJoin      MessageType = "join"
 	MessageTypeHeartbeat MessageType = "heartbeat"
-	MessageTypeSync     MessageType = "sync" // Untuk pertukaran daftar peer
+	MessageTypeSync      MessageType = "sync" // Untuk pertukaran daftar peer
+
+	// Pesan untuk penemuan IP publik
+	MessageTypeWhoAmI         MessageType = "whoami"
+	MessageTypeWhoAmIResponse MessageType = "whoami_response"
 )
 
 // GossipMessage adalah struktur dasar untuk semua pesan gossip.
@@ -23,12 +27,15 @@ type JoinPayload struct {
 
 // HeartbeatPayload dikirim secara berkala oleh node aktif.
 type HeartbeatPayload struct {
-	// Mungkin berisi informasi tambahan di masa depan,
-	// seperti versi state atau subset peer yang diketahui.
 	KnownPeers []string `json:"known_peers,omitempty"` // Subset peer yang diketahui pengirim
 }
 
 // SyncPayload berisi daftar peer yang diketahui.
 type SyncPayload struct {
 	Peers []string `json:"peers"` // Daftar lengkap peer yang diketahui pengirim
+}
+
+// WhoAmIResponsePayload berisi alamat publik yang diamati dari pemohon.
+type WhoAmIResponsePayload struct {
+	PublicAddr string `json:"public_addr"`
 }
