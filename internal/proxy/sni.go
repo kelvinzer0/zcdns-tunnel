@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"zcdns-tunnel/internal/tunnel"
+	"zcdns-tunnel/internal/utils"
+
+	"github.com/sirupsen/logrus"
 )
 
 // SNIProxy handles routing TLS connections based on the SNI hostname.
@@ -171,44 +173,27 @@ func (p *SNIProxy) handleConnectionMultiplex(conn net.Conn) {
 	}
 
 	// Priority 2: Handle HTTP traffic
-	// We need to peek more to identify HTTP methods
-	peeked, err = prefixedConn.r.Peek(1024) // Peek up to 1KB for HTTP header
+	// Try to read the first line to identify HTTP
+	// Read first chunk for analysis
+	buf := make([]byte, 32) // Enough for most HTTP request lines
+	n, err := prefixedConn.r.Read(buf)
 	if err != nil && err != io.EOF {
-		logrus.WithField("remote_addr", conn.RemoteAddr()).WithError(err).Warn("Failed to peek for HTTP")
+		logrus.WithField("remote_addr", prefixedConn.RemoteAddr()).WithError(err).Warn("Failed to read for protocol detection")
 		p.handleDefaultTCPConnection(prefixedConn)
 		return
 	}
 
-	// Log the peeked data for debugging
-	logrus.WithFields(logrus.Fields{
-		"remote_addr": conn.RemoteAddr(),
-		"peeked_data": string(peeked),
-		"peeked_len":  len(peeked),
-	}).Debug("Peeked data for HTTP detection")
+	// Prepend read data back
+	prefixedConn.Prepend(buf[:n])
 
-	httpMethods := []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT "}
-	isHTTP := false
-	for _, method := range httpMethods {
-		if strings.HasPrefix(string(peeked), method) {
-			isHTTP = true
-			break
-		}
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"remote_addr": conn.RemoteAddr(),
-		"is_http":     isHTTP,
-	}).Debug("HTTP detection result")
-
-	if isHTTP {
+	// Fast state machine detection
+	if utils.IsHTTPRequestFast(buf[:n]) {
 		p.handleHTTPConnection(prefixedConn)
 		return
 	}
 
-	// Priority 3 (Fallback): Handle as generic TCP traffic
 	p.handleDefaultTCPConnection(prefixedConn)
 }
-
 
 // handleDefaultTCPConnection handles plain TCP traffic by proxying to the default backend.
 func (p *SNIProxy) handleDefaultTCPConnection(clientConn net.Conn) {
@@ -226,8 +211,8 @@ func (p *SNIProxy) handleDefaultTCPConnection(clientConn net.Conn) {
 	backendConn, err := net.Dial("tcp", backendAddr)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
-			"remote_addr":  clientConn.RemoteAddr(),
-			"backend_addr": backendAddr,
+			"remote_addr":   clientConn.RemoteAddr(),
+			"backend_addr":  backendAddr,
 			logrus.ErrorKey: err,
 		}).Error("Failed to connect to default TCP backend")
 		return
