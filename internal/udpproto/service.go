@@ -364,7 +364,16 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 
 	// Verifikasi tanda tangan
 	if !msg.Verify(s.secret) {
-		logrus.Warnf("Verifikasi tanda tangan gagal untuk pesan dari %s", remoteAddr.String())
+		// Log informasi tambahan untuk membantu debugging
+		logrus.Warnf("Verifikasi tanda tangan gagal untuk pesan dari %s (type: %s, sender: %s, secret length: %d)", 
+			remoteAddr.String(), msg.Type, msg.Sender, len(s.secret))
+		
+		// Coba verifikasi dengan secret kosong (untuk debugging)
+		if msg.Verify([]byte("")) {
+			logrus.Warnf("Pesan dari %s dapat diverifikasi dengan secret kosong, kemungkinan pengirim tidak menggunakan secret", 
+				remoteAddr.String())
+		}
+		
 		return
 	}
 
@@ -475,13 +484,19 @@ func UDPServiceFromGossip(provider common.UDPProvider, clusterSecret string) *UD
 		MessageMaxAge: DefaultMessageMaxAge,
 	}
 	
+	// Pastikan menggunakan secret yang sama dengan gossip service
+	secret := []byte(clusterSecret)
+	
+	// Log untuk debugging
+	logrus.Infof("UDPService menggunakan cluster secret dengan panjang: %d bytes", len(secret))
+	
 	service := &UDPService{
 		config:      config,
 		localAddr:   provider.GetLocalAddr(),
 		conn:        provider.GetUDPConn(), // Gunakan koneksi UDP yang sama dengan GossipService
 		handlers:    make(map[string]MessageHandler),
 		pendingResp: make(map[string]chan *Message),
-		secret:      []byte(clusterSecret),
+		secret:      secret,
 		stopChan:    make(chan struct{}),
 	}
 	

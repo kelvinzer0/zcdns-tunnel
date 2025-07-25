@@ -42,6 +42,9 @@ func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAdd
 		return nil, fmt.Errorf("invalid probe_timeout: %w", err)
 	}
 	
+	// Log cluster secret untuk debugging
+	logrus.Infof("Initializing SimpleGossipService with cluster secret (length: %d)", len(clusterSecret))
+	
 	return &SimpleGossipService{
 		localAddr:        publicAddr,
 		peers:            make(map[string]*Peer),

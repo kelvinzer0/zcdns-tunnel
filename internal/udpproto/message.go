@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -76,6 +78,12 @@ func (m *Message) Sign(secret []byte) error {
 	// Reset HMAC sebelum menandatangani
 	m.HMAC = nil
 
+	// Jika secret kosong, tidak perlu menandatangani
+	if len(secret) == 0 {
+		logrus.Debug("Secret kosong, pesan tidak akan ditandatangani")
+		return nil
+	}
+
 	// Serialize pesan tanpa HMAC
 	msgBytes, err := json.Marshal(m)
 	if err != nil {
@@ -94,11 +102,31 @@ func (m *Message) Sign(secret []byte) error {
 func (m *Message) Verify(secret []byte) bool {
 	// Simpan HMAC asli
 	originalHMAC := m.HMAC
+	
+	// Jika tidak ada HMAC dan secret kosong, anggap valid
+	if len(originalHMAC) == 0 && len(secret) == 0 {
+		logrus.Debug("Pesan tanpa HMAC dan secret kosong, dianggap valid")
+		return true
+	}
+	
+	// Jika ada HMAC tapi secret kosong, anggap tidak valid
+	if len(originalHMAC) > 0 && len(secret) == 0 {
+		logrus.Debug("Pesan dengan HMAC tapi secret kosong, dianggap tidak valid")
+		return false
+	}
+	
+	// Jika tidak ada HMAC tapi ada secret, anggap tidak valid
+	if len(originalHMAC) == 0 && len(secret) > 0 {
+		logrus.Debug("Pesan tanpa HMAC tapi ada secret, dianggap tidak valid")
+		return false
+	}
+	
 	m.HMAC = nil
 
 	// Serialize pesan tanpa HMAC
 	msgBytes, err := json.Marshal(m)
 	if err != nil {
+		logrus.Warnf("Gagal serialize pesan untuk verifikasi: %v", err)
 		return false
 	}
 
@@ -109,6 +137,12 @@ func (m *Message) Verify(secret []byte) bool {
 
 	// Kembalikan HMAC asli
 	m.HMAC = originalHMAC
+
+	// Log untuk debugging jika verifikasi gagal
+	if !hmac.Equal(calculatedHMAC, originalHMAC) {
+		logrus.Debugf("Verifikasi tanda tangan gagal: secret length=%d, original HMAC length=%d, calculated HMAC length=%d", 
+			len(secret), len(originalHMAC), len(calculatedHMAC))
+	}
 
 	// Bandingkan HMAC
 	return hmac.Equal(calculatedHMAC, originalHMAC)
