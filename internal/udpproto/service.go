@@ -134,13 +134,8 @@ func (s *UDPService) RegisterHandler(msgType string, handler MessageHandler) {
 
 // SendMessage mengirim pesan ke alamat tujuan dan menunggu respons
 func (s *UDPService) SendMessage(ctx context.Context, msg *Message, targetAddr string) (*Message, error) {
-	// Tandatangani pesan jika secret tidak kosong
-	// Jika secret kosong, kita skip proses ini untuk meningkatkan performa
-	if len(s.secret) > 0 {
-		if err := msg.Sign(s.secret); err != nil {
-			return nil, fmt.Errorf("gagal menandatangani pesan: %w", err)
-		}
-	}
+	// Tidak lagi menandatangani pesan untuk meningkatkan performa
+	logrus.Debugf("Skipping message signing for performance")
 
 	// Buat channel untuk respons
 	respChan := make(chan *Message, 1)
@@ -220,13 +215,8 @@ func getTimeoutFromContext(ctx context.Context, defaultTimeout time.Duration) ti
 
 // SendMessageWithoutResponse mengirim pesan tanpa menunggu respons
 func (s *UDPService) SendMessageWithoutResponse(msg *Message, targetAddr string) error {
-	// Tandatangani pesan jika secret tidak kosong
-	// Jika secret kosong, kita skip proses ini untuk meningkatkan performa
-	if len(s.secret) > 0 {
-		if err := msg.Sign(s.secret); err != nil {
-			return fmt.Errorf("gagal menandatangani pesan: %w", err)
-		}
-	}
+	// Tidak lagi menandatangani pesan untuk meningkatkan performa
+	logrus.Debugf("Skipping message signing for performance")
 
 	// Kirim pesan
 	return s.sendMessageRaw(msg, targetAddr)
@@ -368,17 +358,8 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 		return
 	}
 
-	// Verifikasi tanda tangan jika secret tidak kosong
-	// Jika secret kosong, kita skip verifikasi untuk meningkatkan performa
-	if len(s.secret) > 0 {
-		if !msg.Verify(s.secret) {
-			// Log informasi tambahan untuk membantu debugging
-			logrus.Warnf("Verifikasi tanda tangan gagal untuk pesan dari %s (type: %s, sender: %s, secret length: %d)", 
-				remoteAddr.String(), msg.Type, msg.Sender, len(s.secret))
-			
-			return
-		}
-	}
+	// Jika tidak ada secret, skip verifikasi untuk meningkatkan performa
+	logrus.Debugf("Skipping signature verification for message from %s", remoteAddr.String())
 
 	// Periksa kadaluarsa
 	if msg.IsExpired(s.config.MessageMaxAge) {
@@ -427,10 +408,8 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 				return
 			}
 			
-			if err := respMsg.Sign(s.secret); err != nil {
-				logrus.Errorf("Gagal menandatangani respons error: %v", err)
-				return
-			}
+			// Tidak lagi menandatangani pesan untuk meningkatkan performa
+			logrus.Debugf("Skipping message signing for performance")
 			
 			respBytes, err := json.Marshal(respMsg)
 			if err != nil {
@@ -456,10 +435,8 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 	// Jika handler mengembalikan respons, kirim kembali ke pengirim
 	if resp != nil {
 		resp.Sender = s.localAddr
-		if err := resp.Sign(s.secret); err != nil {
-			logrus.Errorf("Gagal menandatangani respons: %v", err)
-			return
-		}
+		// Tidak lagi menandatangani pesan untuk meningkatkan performa
+		logrus.Debugf("Skipping message signing for performance")
 
 		respBytes, err := json.Marshal(resp)
 		if err != nil {
@@ -477,7 +454,7 @@ func (s *UDPService) GetListenAddr() string {
 	return s.config.ListenAddr
 }
 // UDPServiceFromGossip membuat instance UDPService yang menggunakan koneksi UDP dari GossipService
-func UDPServiceFromGossip(provider common.UDPProvider, clusterSecret string) *UDPService {
+func UDPServiceFromGossip(provider common.UDPProvider) *UDPService {
 	// Always use the DefaultUDPPort (7946) for consistency
 	listenAddr := fmt.Sprintf(":%d", DefaultUDPPort)
 	

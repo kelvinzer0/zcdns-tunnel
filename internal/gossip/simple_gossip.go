@@ -26,12 +26,11 @@ type SimpleGossipService struct {
 	stopChan        chan struct{}
 	wg              sync.WaitGroup
 	PeerUpdateChan  chan struct{}
-	clusterSecret   string
 	validationDomain string
 }
 
 // NewSimpleGossipService membuat instance SimpleGossipService baru
-func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAddr, clusterSecret string) (*SimpleGossipService, error) {
+func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAddr string) (*SimpleGossipService, error) {
 	probeInterval, err := time.ParseDuration(cfg.ProbeInterval)
 	if err != nil {
 		return nil, fmt.Errorf("invalid probe_interval: %w", err)
@@ -52,7 +51,6 @@ func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAdd
 		probeTimeout:     probeTimeout,
 		stopChan:         make(chan struct{}),
 		PeerUpdateChan:   make(chan struct{}, 1),
-		clusterSecret:    "", // Gunakan string kosong untuk meningkatkan performa
 		validationDomain: validationDomain,
 	}, nil
 }
@@ -235,11 +233,8 @@ func (gs *SimpleGossipService) handleMessage(msgBytes []byte, remoteAddr *net.UD
 			return
 		}
 		
-		// Verify UDP message signature
-		if !udpMsg.Verify([]byte(gs.clusterSecret)) {
-			logrus.Warnf("Invalid signature for UDP message from %s", remoteAddr.String())
-			return
-		}
+		// Tidak lagi memverifikasi tanda tangan UDP karena clusterSecret telah dihapus
+		logrus.Debugf("Received UDP message from %s, skipping signature verification", remoteAddr.String())
 		
 		// If this is a UDP message, we don't need to process it here
 		// This message will be handled by the UDPService
@@ -276,11 +271,8 @@ func (gs *SimpleGossipService) handleMessage(msgBytes []byte, remoteAddr *net.UD
 		return
 	}
 	
-	// Verifikasi tanda tangan SimpleGossipMessage
-	if !msg.VerifyHMAC([]byte(gs.clusterSecret)) {
-		logrus.Warnf("Invalid HMAC for gossip message from %s", remoteAddr.String())
-		return
-	}
+	// Tidak lagi memverifikasi HMAC karena clusterSecret telah dihapus
+	logrus.Debugf("Received gossip message from %s, skipping HMAC verification", remoteAddr.String())
 	
 	// Periksa kadaluarsa pesan (lebih dari 30 detik dianggap kadaluarsa)
 	if time.Now().Unix() - msg.Timestamp > 30 {
@@ -518,7 +510,8 @@ func (gs *SimpleGossipService) sendJoin(targetAddr string) {
 		Payload:   payloadBytes,
 	}
 	
-	msg.Sign([]byte(gs.clusterSecret))
+	// Tidak lagi menandatangani pesan karena clusterSecret telah dihapus
+	logrus.Debugf("Sending message without signing")
 	
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -538,7 +531,8 @@ func (gs *SimpleGossipService) sendJoinAck(targetAddr string) {
 		Payload:   []byte("{}"),
 	}
 	
-	msg.Sign([]byte(gs.clusterSecret))
+	// Tidak lagi menandatangani pesan karena clusterSecret telah dihapus
+	logrus.Debugf("Sending message without signing")
 	
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -568,7 +562,8 @@ func (gs *SimpleGossipService) sendHeartbeat(targetAddr string, peerList []strin
 		Payload:   payloadBytes,
 	}
 	
-	msg.Sign([]byte(gs.clusterSecret))
+	// Tidak lagi menandatangani pesan karena clusterSecret telah dihapus
+	logrus.Debugf("Sending message without signing")
 	
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -588,7 +583,8 @@ func (gs *SimpleGossipService) sendHeartbeatAck(targetAddr string) {
 		Payload:   []byte("{}"),
 	}
 	
-	msg.Sign([]byte(gs.clusterSecret))
+	// Tidak lagi menandatangani pesan karena clusterSecret telah dihapus
+	logrus.Debugf("Sending message without signing")
 	
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {

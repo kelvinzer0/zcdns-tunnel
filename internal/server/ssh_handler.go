@@ -100,7 +100,7 @@ func NewSSHServer(cfg config.ServerConfig, gs common.GossipProvider, localGossip
 		logrus.Info("Initializing UDP service without cluster secret for better performance")
 		
 		// Initialize UDP service using the UDP connection from the gossip service
-		udpService = udpproto.UDPServiceFromGossip(udpProvider, "")
+		udpService = udpproto.UDPServiceFromGossip(udpProvider)
 		
 		// Check if the UDP connection was successfully shared
 		if udpService.GetUDPConn() == nil {
