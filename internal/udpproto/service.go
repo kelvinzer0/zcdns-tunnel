@@ -16,6 +16,8 @@ const (
 	DefaultMessageTimeout = 5 * time.Second
 	// DefaultMessageMaxAge adalah usia maksimum pesan yang valid
 	DefaultMessageMaxAge = 10 * time.Second
+	// DefaultUDPPort adalah port default untuk komunikasi UDP
+	DefaultUDPPort = 7946
 )
 
 // Config adalah konfigurasi untuk UDPService
@@ -59,17 +61,47 @@ func NewUDPService(config Config, localAddr string) *UDPService {
 
 // Start memulai service UDP
 func (s *UDPService) Start(ctx context.Context) error {
-	addr, err := net.ResolveUDPAddr("udp", s.config.ListenAddr)
+	// Ekstrak port dari localAddr jika ada
+	_, port, err := net.SplitHostPort(s.localAddr)
+	if err != nil {
+		// Jika tidak bisa di-parse, gunakan port default
+		port = fmt.Sprintf("%d", DefaultUDPPort)
+	}
+
+	// Gunakan port yang sama dengan gossip service untuk menghindari konflik
+	listenAddr := fmt.Sprintf(":%s", port)
+	
+	logrus.Infof("UDP service akan menggunakan port yang sama dengan gossip service: %s", listenAddr)
+	
+	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("gagal resolve alamat UDP: %w", err)
 	}
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		return fmt.Errorf("gagal listen UDP: %w", err)
+		// Jika gagal mendengarkan pada port yang sama, gunakan port alternatif
+		altPort := DefaultUDPPort + 1000 // Gunakan port alternatif (misalnya 8946)
+		altListenAddr := fmt.Sprintf(":%d", altPort)
+		logrus.Warnf("Gagal listen pada port %s, mencoba port alternatif %s", listenAddr, altListenAddr)
+		
+		altAddr, err := net.ResolveUDPAddr("udp", altListenAddr)
+		if err != nil {
+			return fmt.Errorf("gagal resolve alamat UDP alternatif: %w", err)
+		}
+		
+		conn, err = net.ListenUDP("udp", altAddr)
+		if err != nil {
+			return fmt.Errorf("gagal listen UDP pada port alternatif: %w", err)
+		}
+		
+		// Update listenAddr ke port yang berhasil
+		s.config.ListenAddr = altListenAddr
+	} else {
+		s.config.ListenAddr = listenAddr
 	}
+	
 	s.conn = conn
-
 	logrus.Infof("UDP service listening on %s", s.config.ListenAddr)
 
 	s.wg.Add(1)
@@ -263,4 +295,8 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 			logrus.Errorf("Gagal kirim respons ke %s: %v", remoteAddr.String(), err)
 		}
 	}
+}
+// GetListenAddr mengembalikan alamat yang digunakan untuk mendengarkan
+func (s *UDPService) GetListenAddr() string {
+	return s.config.ListenAddr
 }

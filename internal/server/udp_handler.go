@@ -6,7 +6,6 @@ import (
 	"net"
 
 	"github.com/sirupsen/logrus"
-	"zcdns-tunnel/internal/gossip"
 	"zcdns-tunnel/internal/udpproto"
 )
 
@@ -114,9 +113,16 @@ func (s *SSHServer) getUDPAddressForNode(nodeAddr string) string {
 	host, _, err := net.SplitHostPort(nodeAddr)
 	if err != nil {
 		// Jika gagal parse, gunakan alamat asli
-		return fmt.Sprintf("%s:%d", nodeAddr, gossip.DefaultGossipPort)
+		return fmt.Sprintf("%s:%d", nodeAddr, udpproto.DefaultUDPPort)
 	}
 	
-	// Gunakan port UDP default
-	return fmt.Sprintf("%s:%d", host, gossip.DefaultGossipPort)
+	// Coba dapatkan port UDP dari UDPService
+	_, udpPort, err := net.SplitHostPort(s.UDPService.GetListenAddr())
+	if err != nil {
+		// Jika gagal, gunakan port UDP default
+		udpPort = fmt.Sprintf("%d", udpproto.DefaultUDPPort)
+	}
+	
+	// Gunakan port UDP yang sama dengan yang kita gunakan
+	return fmt.Sprintf("%s:%s", host, udpPort)
 }
