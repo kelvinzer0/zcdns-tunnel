@@ -90,13 +90,8 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		Timeout:         5 * time.Second,
 	}
 
-	// Inisialisasi UDP service
-	udpConfig := udpproto.Config{
-		ListenAddr:    fmt.Sprintf(":%d", gossip.DefaultGossipPort),
-		ClusterSecret: cfg.ClusterSecret,
-		MessageMaxAge: 10 * time.Second,
-	}
-	udpService := udpproto.NewUDPService(udpConfig, localGossipAddr)
+	// Inisialisasi UDP service yang menggunakan koneksi UDP dari GossipService
+	udpService := udpproto.UDPServiceFromGossip(gs, cfg.ClusterSecret)
 
 	server := &SSHServer{
 		Config:                   cfg,
@@ -136,8 +131,8 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	}
 	sshConfig.AddHostKey(hostSigner)
 
-	// Start UDP service for inter-node communication
-	if err := s.UDPService.Start(ctx); err != nil {
+	// Start UDP service for inter-node communication using existing connection
+	if err := s.UDPService.StartWithExistingConn(ctx); err != nil {
 		return fmt.Errorf("failed to start UDP service: %w", err)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"zcdns-tunnel/internal/gossip"
 )
 
 const (
@@ -349,4 +350,38 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 // GetListenAddr mengembalikan alamat yang digunakan untuk mendengarkan
 func (s *UDPService) GetListenAddr() string {
 	return s.config.ListenAddr
+}
+// UDPServiceFromGossip membuat instance UDPService yang menggunakan koneksi UDP dari GossipService
+func UDPServiceFromGossip(gs *gossip.GossipService, clusterSecret string) *UDPService {
+	config := Config{
+		ListenAddr:    gs.GetListenAddr(),
+		ClusterSecret: clusterSecret,
+		MessageMaxAge: DefaultMessageMaxAge,
+	}
+	
+	service := &UDPService{
+		config:      config,
+		localAddr:   gs.GetLocalAddr(),
+		conn:        gs.GetUDPConn(), // Gunakan koneksi UDP yang sama dengan GossipService
+		handlers:    make(map[string]MessageHandler),
+		pendingResp: make(map[string]chan *Message),
+		secret:      []byte(clusterSecret),
+		stopChan:    make(chan struct{}),
+	}
+	
+	return service
+}
+// StartWithExistingConn memulai service UDP dengan koneksi yang sudah ada
+func (s *UDPService) StartWithExistingConn(ctx context.Context) error {
+	// Pastikan koneksi sudah ada
+	if s.conn == nil {
+		return fmt.Errorf("koneksi UDP tidak tersedia")
+	}
+	
+	logrus.Infof("UDP service menggunakan koneksi UDP yang sama dengan gossip service pada %s", s.config.ListenAddr)
+	
+	s.wg.Add(1)
+	go s.listenForMessages(ctx)
+	
+	return nil
 }
