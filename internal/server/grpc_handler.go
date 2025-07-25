@@ -179,7 +179,7 @@ func (s *SSHServer) getIntermediaryAddrFromResponsibleNode(ctx context.Context, 
 	logrus.Infof("Retrieving intermediary address for domain %s from node %s at address %s (gRPC port: %d)", 
 		domain, responsibleNode, host, grpcPort)
 
-	// Get the intermediary address using gRPC
+	// Get the intermediary address using gRPC with improved error handling
 	intermediaryAddr, err := s.GRPCClient.GetIntermediaryAddrWithRetry(
 		ctx, 
 		host, 
@@ -195,6 +195,15 @@ func (s *SSHServer) getIntermediaryAddrFromResponsibleNode(ctx context.Context, 
 	}
 
 	if intermediaryAddr == "" {
+		// If the responsible node returned an empty address, try to check our local state
+		// This can happen if the node is responsible but hasn't yet received the shared state
+		localAddr, ok := s.Manager.LoadBridgeAddress(domain, protocolPrefix, publicPort)
+		if ok && localAddr != "" {
+			logrus.Infof("Using locally stored intermediary address %s for domain %s as responsible node returned empty", 
+				localAddr, domain)
+			return localAddr, nil
+		}
+		
 		return "", fmt.Errorf("no intermediary address found for domain %s on node %s", domain, responsibleNode)
 	}
 

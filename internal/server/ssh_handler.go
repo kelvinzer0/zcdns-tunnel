@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -261,12 +263,17 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {
 	defer conn.Close()
 
-	// Set a timeout for the SSH handshake
+	// For TCP connections, set TCP keepalive to detect and recover from network issues
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetDeadline(time.Now().Add(10 * time.Second))
+		// Set TCP keepalive to detect dead connections
+		tcpConn.SetKeepAlive(true)
+		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		
+		// Set a longer timeout for the SSH handshake
+		tcpConn.SetDeadline(time.Now().Add(30 * time.Second))
 	}
 
-	// Try to establish SSH connection
+	// Try to establish SSH connection with better error handling
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, sshConfig)
 	
 	// Reset the deadline after handshake
@@ -275,10 +282,37 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConf
 	}
 	
 	if err != nil {
-		logrus.WithFields(logrus.Fields{
+		// Provide more detailed logging for SSH handshake failures
+		logFields := logrus.Fields{
 			"remote_addr":   conn.RemoteAddr(),
 			logrus.ErrorKey: err,
-		}).Error("Failed to handshake SSH")
+		}
+		
+		// Add connection details for debugging
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			localAddr := tcpConn.LocalAddr()
+			if localAddr != nil {
+				logFields["local_addr"] = localAddr.String()
+			}
+		}
+		
+		// Check for specific error types
+		if err == io.EOF {
+			logFields["error_type"] = "EOF"
+			logrus.WithFields(logFields).Error("SSH handshake failed with EOF - client disconnected prematurely")
+		} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			logFields["error_type"] = "Timeout"
+			logrus.WithFields(logFields).Error("SSH handshake failed with timeout - consider increasing handshake timeout")
+		} else if strings.Contains(err.Error(), "connection reset by peer") {
+			logFields["error_type"] = "ConnectionReset"
+			logrus.WithFields(logFields).Error("SSH handshake failed - connection reset by peer")
+		} else if strings.Contains(err.Error(), "protocol negotiation failed") {
+			logFields["error_type"] = "ProtocolNegotiationFailed"
+			logrus.WithFields(logFields).Error("SSH protocol negotiation failed - check client compatibility")
+		} else {
+			logFields["error_type"] = "Other"
+			logrus.WithFields(logFields).Error("Failed to handshake SSH")
+		}
 		return
 	}
 	logrus.WithFields(logrus.Fields{
@@ -425,9 +459,37 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		}
 
 		// Attempt to get the intermediary address from the responsible node
-		intermediaryAddr, err := s.getIntermediaryAddrFromResponsibleNode(ctx, domain, responsibleNode, forwardID, protocolPrefix, port)
-		if err != nil {
-			logrus.WithError(err).Warnf("Failed to get intermediary address from responsible node %s, SSH handshake may fail", responsibleNode)
+		// Use a longer timeout and implement retries
+		intermediaryAddrCtx, intermediaryAddrCancel := context.WithTimeout(ctx, 15*time.Second)
+		defer intermediaryAddrCancel()
+		
+		var intermediaryAddr string
+		var intermediaryAddrErr error
+		
+		// Implement retries for getting the intermediary address
+		for retries := 0; retries < 5; retries++ {
+			if retries > 0 {
+				// Add exponential backoff
+				backoffTime := time.Duration(1<<uint(retries-1)) * 200 * time.Millisecond
+				logrus.Infof("Retrying to get intermediary address from responsible node %s (attempt %d/5, backoff: %v)", 
+					responsibleNode, retries+1, backoffTime)
+				time.Sleep(backoffTime)
+			}
+			
+			intermediaryAddr, intermediaryAddrErr = s.getIntermediaryAddrFromResponsibleNode(
+				intermediaryAddrCtx, domain, responsibleNode, forwardID, protocolPrefix, port)
+			
+			if intermediaryAddrErr == nil && intermediaryAddr != "" {
+				// Successfully got the intermediary address
+				break
+			}
+		}
+		
+		if intermediaryAddrErr != nil {
+			logrus.WithError(intermediaryAddrErr).Warnf("Failed to get intermediary address from responsible node %s after multiple attempts, SSH handshake may fail", responsibleNode)
+			// We'll continue without the intermediary address, but SSH handshake may fail
+		} else if intermediaryAddr == "" {
+			logrus.Warnf("Got empty intermediary address from responsible node %s, SSH handshake may fail", responsibleNode)
 			// We'll continue without the intermediary address, but SSH handshake may fail
 		} else {
 			// Store the intermediary address in our local manager so it can be used when handling forwarded channels
