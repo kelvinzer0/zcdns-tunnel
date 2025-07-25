@@ -17,6 +17,7 @@ import (
 	"zcdns-tunnel/internal/config"
 	"zcdns-tunnel/internal/consistenthash"
 	"zcdns-tunnel/internal/gossip"
+	"zcdns-tunnel/internal/grpc"
 	"zcdns-tunnel/internal/proxy"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
 	"zcdns-tunnel/internal/tunnel"
@@ -50,11 +51,12 @@ type SSHServer struct {
 	Config  config.ServerConfig
 	Manager *tunnel.Manager
 
-	// Distributed system components
-	GossipService   *gossip.GossipService
+	// For distributed system components
+	GossipService   common.GossipProvider
 	UDPService      *udpproto.UDPService
 	ConsistentHash  *consistenthash.Map
 	LocalGossipAddr string // The local address of this node for consistent hashing
+	GRPCClient      *grpc.GRPCClient // gRPC client for communication with other nodes
 
 	interNodeSSHClientConfig *ssh.ClientConfig // SSH client config for inter-node communication
 	interNodeSigner          ssh.Signer        // SSH signer for inter-node communication
@@ -75,7 +77,7 @@ type SSHServer struct {
 }
 
 // NewSSHServer creates a new SSH server instance.
-func NewSSHServer(cfg config.ServerConfig, gs common.UDPProvider, localGossipAddr string) *SSHServer {
+func NewSSHServer(cfg config.ServerConfig, gs common.GossipProvider, localGossipAddr string) (*SSHServer, error) {
 	// Load inter-node SSH client key
 	interNodeSigner, err := auth.LoadHostKey(cfg.InterNodeSSHKeyPath)
 	if err != nil {
@@ -91,16 +93,37 @@ func NewSSHServer(cfg config.ServerConfig, gs common.UDPProvider, localGossipAdd
 		Timeout:         5 * time.Second,
 	}
 
-	// Inisialisasi UDP service yang menggunakan koneksi UDP dari GossipService
-	udpService := udpproto.UDPServiceFromGossip(gs, cfg.ClusterSecret)
+	// Check if the gossip provider also implements UDPProvider
+	var udpService *udpproto.UDPService
+	if udpProvider, ok := gs.(common.UDPProvider); ok {
+		// Initialize UDP service using the UDP connection from the gossip service
+		udpService = udpproto.UDPServiceFromGossip(udpProvider, cfg.ClusterSecret)
+		
+		// Check if the UDP connection was successfully shared
+		if udpService.GetUDPConn() == nil {
+			logrus.Warn("Failed to get UDP connection from gossip service, UDP-based communication will be disabled")
+		} else {
+			logrus.Infof("Successfully initialized UDP service with shared connection from gossip service")
+		}
+	} else {
+		// If the gossip provider doesn't implement UDPProvider, create a dummy UDP service
+		// This is fine for gRPC-based communication as we won't be using UDP
+		logrus.Info("Gossip provider doesn't support UDP, UDP-based communication will be disabled")
+		udpService = &udpproto.UDPService{}
+	}
+
+	// Create a gRPC client for communication with other nodes
+	grpcClient := grpc.NewGRPCClient(cfg.Gossip, localGossipAddr)
+	logrus.Info("Initialized gRPC client for inter-node communication")
 
 	server := &SSHServer{
 		Config:                   cfg,
 		Manager:                  tunnel.NewManager(),
-		GossipService:            gs.(*gossip.GossipService), // Type assertion since we need the specific type
+		GossipService:            gs,
 		UDPService:               udpService,
 		ConsistentHash:           consistenthash.New(100, nil), // 100 virtual nodes per real node
 		LocalGossipAddr:          localGossipAddr,
+		GRPCClient:               grpcClient,
 		interNodeSSHClientConfig: interNodeSSHClientConfig,
 		interNodeSigner:          interNodeSigner,
 		sniListeners:             make(map[string]*proxy.SNIProxy),
@@ -110,11 +133,19 @@ func NewSSHServer(cfg config.ServerConfig, gs common.UDPProvider, localGossipAdd
 		forwardedClientConns:     make(map[string]*ssh.ServerConn),
 	}
 
-	// Register UDP message handlers
-	udpService.RegisterHandler(udpproto.MessageTypeForward, server.handleForwardRequest)
-	udpService.RegisterHandler(udpproto.MessageTypeForwardResponse, server.handleForwardResponse)
+	// Register UDP message handlers if UDP service is available
+	if udpService.GetUDPConn() != nil {
+		udpService.RegisterHandler(udpproto.MessageTypeForward, server.handleForwardRequest)
+		udpService.RegisterHandler(udpproto.MessageTypeForwardResponse, server.handleForwardResponse)
+	}
 
-	return server
+	// If the gossip provider is a GRPCServer, register the server as the forward handler
+	if grpcServer, ok := gs.(*grpc.GRPCServer); ok {
+		grpcServer.SetForwardHandler(newSSHForwardHandler(server))
+		logrus.Info("Registered SSH server as gRPC forward handler")
+	}
+
+	return server, nil
 }
 
 // StartSSHServer starts the SSH listener.
@@ -132,13 +163,20 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	}
 	sshConfig.AddHostKey(hostSigner)
 
-	// Start UDP service for inter-node communication using existing connection
-	if err := s.UDPService.StartWithExistingConn(ctx); err != nil {
-		return fmt.Errorf("failed to start UDP service: %w", err)
+	// Start UDP service for inter-node communication if available
+	if s.UDPService != nil && s.UDPService.GetUDPConn() != nil {
+		if err := s.UDPService.StartWithExistingConn(ctx); err != nil {
+			logrus.Warnf("Failed to start UDP service: %v", err)
+			logrus.Info("Continuing without UDP service, will use gRPC if available")
+		} else {
+			logrus.Info("UDP service started successfully")
+		}
+	} else {
+		logrus.Info("UDP service not available, will use gRPC for communication")
 	}
 
 	go func() {
-		for range s.GossipService.PeerUpdateChan {
+		for range s.GossipService.GetPeerUpdateChan() {
 			logrus.Debug("Peer list updated, rebuilding consistent hash ring.")
 			s.mu.Lock()
 			// Clear existing nodes
@@ -208,8 +246,10 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	<-ctx.Done()
 	logrus.Info("SSH servers shutting down.")
 	
-	// Stop UDP service
-	s.UDPService.Stop()
+	// Stop UDP service if it's running
+	if s.UDPService != nil && s.UDPService.GetUDPConn() != nil {
+		s.UDPService.Stop()
+	}
 	
 	return nil
 }
@@ -349,7 +389,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		s.forwardedClientConns[forwardID] = sshConn
 		s.mu.Unlock()
 
-		// Forward the request using UDP protocol
+		// Forward the request using the appropriate method (gRPC or UDP)
 		ok, port, err := s.forwardToResponsibleNode(ctx, domain, responsibleNode, forwardID, payload.BindAddr, payload.BindPort, sshConn.RemoteAddr().String())
 		if err != nil {
 			logrus.WithError(err).Errorf("Failed to forward request to responsible node %s", responsibleNode)

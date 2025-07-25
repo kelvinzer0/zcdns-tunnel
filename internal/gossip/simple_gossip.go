@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,9 +62,35 @@ func (gs *SimpleGossipService) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 	
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen UDP: %w", err)
+	// Try to listen with exponential backoff in case of temporary errors
+	var conn *net.UDPConn
+	var lastErr error
+	
+	for retries := 0; retries < 5; retries++ {
+		conn, err = net.ListenUDP("udp", addr)
+		if err == nil {
+			break // Successfully established connection
+		}
+		
+		lastErr = err
+		
+		// Check if this is a temporary error that might resolve with retry
+		if opErr, ok := err.(*net.OpError); ok {
+			if opErr.Temporary() {
+				backoffTime := time.Duration(1<<uint(retries)) * 100 * time.Millisecond
+				logrus.Warnf("Temporary error listening on UDP port %d, retrying in %v: %v", 
+					DefaultGossipPort, backoffTime, err)
+				time.Sleep(backoffTime)
+				continue
+			}
+		}
+		
+		// Non-temporary error, no need to retry
+		return fmt.Errorf("failed to listen UDP on port %d: %w", DefaultGossipPort, err)
+	}
+	
+	if conn == nil {
+		return fmt.Errorf("failed to listen UDP after multiple attempts: %w", lastErr)
 	}
 	
 	gs.conn = conn
@@ -119,8 +146,13 @@ func (gs *SimpleGossipService) listenForMessages() {
 				
 				// Untuk error lain, log dengan level debug saja untuk menghindari spam log
 				if opErr, ok := err.(*net.OpError); ok {
-					// Log dengan detail tipe error untuk debugging
-					logrus.Debugf("UDP read error in SimpleGossipService: %s (%T)", opErr.Error(), opErr.Err)
+					// Check for specific network errors that might be temporary
+					if opErr.Temporary() {
+						logrus.Debugf("Temporary UDP read error in SimpleGossipService: %s (%T)", opErr.Error(), opErr.Err)
+					} else {
+						// Log dengan detail tipe error untuk debugging
+						logrus.Debugf("UDP read error in SimpleGossipService: %s (%T)", opErr.Error(), opErr.Err)
+					}
 				} else {
 					logrus.Debugf("Non-timeout error reading from UDP in SimpleGossipService: %v", err)
 				}
@@ -130,8 +162,10 @@ func (gs *SimpleGossipService) listenForMessages() {
 			// Reset read deadline
 			gs.conn.SetReadDeadline(time.Time{})
 			
-			// Proses pesan
-			gs.handleMessage(buf[:n], remoteAddr)
+			// Proses pesan dengan copy buffer untuk menghindari data corruption
+			msgCopy := make([]byte, n)
+			copy(msgCopy, buf[:n])
+			gs.handleMessage(msgCopy, remoteAddr)
 		}
 	}
 }
@@ -541,19 +575,49 @@ func (gs *SimpleGossipService) sendUDPMessage(msg []byte, targetAddr string) {
 		return
 	}
 	
-	// Set write deadline
-	gs.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	
-	_, err = gs.conn.WriteToUDP(msg, addr)
-	
-	// Reset write deadline
-	gs.conn.SetWriteDeadline(time.Time{})
-	
-	if err != nil {
+	// Implement retry with exponential backoff
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		// Add backoff delay for retries
+		if retry > 0 {
+			backoffTime := time.Duration(1<<uint(retry-1)) * 200 * time.Millisecond
+			logrus.Debugf("Retrying send to %s (attempt %d/%d) after %v", targetAddr, retry+1, maxRetries, backoffTime)
+			time.Sleep(backoffTime)
+		}
+		
+		// Set write deadline
+		gs.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		
+		_, err = gs.conn.WriteToUDP(msg, addr)
+		
+		// Reset write deadline
+		gs.conn.SetWriteDeadline(time.Time{})
+		
+		if err == nil {
+			// Message sent successfully
+			return
+		}
+		
+		// Handle different error types
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			logrus.Warnf("Timeout sending message to %s", targetAddr)
+			logrus.Warnf("Timeout sending message to %s (attempt %d/%d), will retry", 
+				targetAddr, retry+1, maxRetries)
+		} else if opErr, ok := err.(*net.OpError); ok {
+			if strings.Contains(opErr.Error(), "connection refused") {
+				logrus.Warnf("Connection refused when sending message to %s (attempt %d/%d)", 
+					targetAddr, retry+1, maxRetries)
+			} else {
+				logrus.Warnf("Error sending message to %s (attempt %d/%d): %v", 
+					targetAddr, retry+1, maxRetries, err)
+			}
 		} else {
-			logrus.Warnf("Failed to send message to %s: %v", targetAddr, err)
+			logrus.Warnf("Unknown error sending message to %s (attempt %d/%d): %v", 
+				targetAddr, retry+1, maxRetries, err)
+		}
+		
+		// Last retry failed
+		if retry == maxRetries-1 {
+			logrus.Errorf("Failed to send message to %s after %d attempts", targetAddr, maxRetries)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,17 +67,48 @@ func NewGossipService(cfg config.GossipConfig, validationDomain, publicAddr stri
 
 // Start memulai layanan gossip, menemukan rekan, dan bergabung dengan klaster.
 func (gs *GossipService) Start(ctx context.Context) error {
-	addr, err := net.ResolveUDPAddr("udp", gs.config.ListenAddr)
+	// Always use the DefaultGossipPort (7946) for consistency
+	listenAddr := fmt.Sprintf(":%d", DefaultGossipPort)
+	gs.config.ListenAddr = listenAddr
+	
+	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve UDP address: %w", err)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		return fmt.Errorf("failed to listen UDP: %w", err)
+	// Try to listen with exponential backoff in case of temporary errors
+	var conn *net.UDPConn
+	var lastErr error
+	
+	for retries := 0; retries < 5; retries++ {
+		conn, err = net.ListenUDP("udp", addr)
+		if err == nil {
+			break // Successfully established connection
+		}
+		
+		lastErr = err
+		
+		// Check if this is a temporary error that might resolve with retry
+		if opErr, ok := err.(*net.OpError); ok {
+			if opErr.Temporary() {
+				backoffTime := time.Duration(1<<uint(retries)) * 100 * time.Millisecond
+				logrus.Warnf("Temporary error listening on UDP port %d, retrying in %v: %v", 
+					DefaultGossipPort, backoffTime, err)
+				time.Sleep(backoffTime)
+				continue
+			}
+		}
+		
+		// Non-temporary error, no need to retry
+		return fmt.Errorf("failed to listen UDP on port %d: %w", DefaultGossipPort, err)
 	}
+	
+	if conn == nil {
+		return fmt.Errorf("failed to listen UDP after multiple attempts: %w", lastErr)
+	}
+	
 	gs.conn = conn
-	logrus.Infof("Gossip service listening on %s, announcing as %s", gs.config.ListenAddr, gs.localAddr)
+	logrus.Infof("Gossip service listening on %s, announcing as %s", listenAddr, gs.localAddr)
 
 	// Tambahkan diri sendiri ke daftar peer
 	gs.peersMu.Lock()
@@ -166,7 +198,7 @@ func (gs *GossipService) join(seedPeers []string) {
 	}
 }
 
-// sendMessage mengirim pesan UDP ke alamat tujuan.
+// sendMessage mengirim pesan UDP ke alamat tujuan dengan retry logic.
 func (gs *GossipService) sendMessage(msg []byte, targetAddr string) {
 	addr, err := net.ResolveUDPAddr("udp", targetAddr)
 	if err != nil {
@@ -174,23 +206,51 @@ func (gs *GossipService) sendMessage(msg []byte, targetAddr string) {
 		return
 	}
 	
-	// Set a timeout for the UDP write operation
-	gs.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
-	
-	_, err = gs.conn.WriteToUDP(msg, addr)
-	if err != nil {
-		// Check if it's a timeout or connection refused error
+	// Implement retry with exponential backoff
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		// Add backoff delay for retries
+		if retry > 0 {
+			backoffTime := time.Duration(1<<uint(retry-1)) * 200 * time.Millisecond
+			logrus.Debugf("Retrying send to %s (attempt %d/%d) after %v", targetAddr, retry+1, maxRetries, backoffTime)
+			time.Sleep(backoffTime)
+		}
+		
+		// Set a timeout for the UDP write operation
+		gs.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		
+		_, err = gs.conn.WriteToUDP(msg, addr)
+		
+		// Reset the write deadline
+		gs.conn.SetWriteDeadline(time.Time{})
+		
+		if err == nil {
+			// Message sent successfully
+			return
+		}
+		
+		// Handle different error types
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			logrus.Warnf("Timeout sending message to %s, peer may be unreachable", targetAddr)
-		} else if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "connection refused" {
-			logrus.Warnf("Connection refused when sending message to %s, peer may be down or port 7946 is blocked", targetAddr)
+			logrus.Warnf("Timeout sending message to %s (attempt %d/%d), will retry", 
+				targetAddr, retry+1, maxRetries)
+		} else if opErr, ok := err.(*net.OpError); ok {
+			if strings.Contains(opErr.Error(), "connection refused") {
+				logrus.Warnf("Connection refused when sending message to %s (attempt %d/%d), peer may be down or port 7946 is blocked", 
+					targetAddr, retry+1, maxRetries)
+			} else {
+				logrus.Warnf("Error sending message to %s (attempt %d/%d): %v", 
+					targetAddr, retry+1, maxRetries, err)
+			}
 		} else {
-			logrus.Errorf("Failed to send message to %s: %v", targetAddr, err)
+			logrus.Warnf("Unknown error sending message to %s (attempt %d/%d): %v", 
+				targetAddr, retry+1, maxRetries, err)
+		}
+		
+		// Last retry failed
+		if retry == maxRetries-1 {
+			logrus.Errorf("Failed to send message to %s after %d attempts", targetAddr, maxRetries)
 		}
 	}
-	
-	// Reset the write deadline
-	gs.conn.SetWriteDeadline(time.Time{})
 }
 
 // listenForMessages mendengarkan pesan UDP yang masuk.
@@ -215,10 +275,15 @@ func (gs *GossipService) listenForMessages() {
 				
 				// Untuk error lain, log dengan level debug saja untuk menghindari spam log
 				if opErr, ok := err.(*net.OpError); ok {
-					// Log dengan detail tipe error untuk debugging
-					logrus.Debugf("UDP read error: %s (%T)", opErr.Error(), opErr.Err)
+					// Check for specific network errors that might be temporary
+					if opErr.Temporary() {
+						logrus.Debugf("Temporary UDP read error in gossip service: %s (%T)", opErr.Error(), opErr.Err)
+					} else {
+						// Log dengan detail tipe error untuk debugging
+						logrus.Debugf("UDP read error in gossip service: %s (%T)", opErr.Error(), opErr.Err)
+					}
 				} else {
-					logrus.Debugf("Non-timeout error reading from UDP: %v", err)
+					logrus.Debugf("Non-timeout error reading from UDP in gossip service: %v", err)
 				}
 				continue
 			}
@@ -226,8 +291,10 @@ func (gs *GossipService) listenForMessages() {
 			// Reset read deadline
 			gs.conn.SetReadDeadline(time.Time{})
 			
-			// Proses pesan dalam goroutine terpisah
-			go gs.handleMessage(buf[:n], remoteAddr)
+			// Proses pesan dalam goroutine terpisah untuk menghindari blocking
+			msgCopy := make([]byte, n)
+			copy(msgCopy, buf[:n])
+			go gs.handleMessage(msgCopy, remoteAddr)
 		}
 	}
 }

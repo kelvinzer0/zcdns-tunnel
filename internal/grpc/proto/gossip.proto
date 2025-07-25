@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package zcdns.tunnel;
+
+option go_package = "zcdns-tunnel/internal/grpc/proto";
+
+// GossipService defines the gRPC service for node communication
+service GossipService {
+  // Join is used when a node wants to join the cluster
+  rpc Join(JoinRequest) returns (JoinResponse) {}
+  
+  // Heartbeat is used to check if a node is alive and exchange peer information
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+  
+  // ForwardRequest is used to forward a tunnel request to the responsible node
+  rpc ForwardRequest(ForwardRequestMessage) returns (ForwardResponseMessage) {}
+}
+
+// Node represents information about a cluster node
+message Node {
+  string address = 1;
+  int32 gossip_port = 2;
+  int32 ssh_port = 3;
+  string ssh_listen_addr = 4;
+}
+
+// JoinRequest is sent when a node wants to join the cluster
+message JoinRequest {
+  Node new_node = 1;
+}
+
+// JoinResponse is the response to a join request
+message JoinResponse {
+  bool success = 1;
+  string error = 2;
+  repeated Node known_peers = 3;
+}
+
+// HeartbeatRequest is sent to check if a node is alive and share peer information
+message HeartbeatRequest {
+  Node sender = 1;
+  repeated Node known_peers = 2;
+}
+
+// HeartbeatResponse is the response to a heartbeat request
+message HeartbeatResponse {
+  bool success = 1;
+  string error = 2;
+  repeated Node known_peers = 3;
+}
+
+// ForwardRequestMessage is sent to forward a tunnel request to the responsible node
+message ForwardRequestMessage {
+  string domain = 1;
+  string bind_addr = 2;
+  uint32 bind_port = 3;
+  string forward_id = 4;
+  string original_addr = 5;
+  Node sender = 6;
+}
+
+// ForwardResponseMessage is the response to a forward request
+message ForwardResponseMessage {
+  string forward_id = 1;
+  bool success = 2;
+  uint32 port = 3;
+  string error = 4;
+}

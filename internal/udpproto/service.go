@@ -20,8 +20,6 @@ const (
 	DefaultMessageMaxAge = 10 * time.Second
 	// DefaultUDPPort adalah port default untuk komunikasi UDP
 	DefaultUDPPort = 7946
-	// AlternativeUDPPort adalah port alternatif untuk komunikasi UDP
-	AlternativeUDPPort = 8946
 )
 
 // Config adalah konfigurasi untuk UDPService
@@ -65,45 +63,48 @@ func NewUDPService(config Config, localAddr string) *UDPService {
 
 // Start memulai service UDP
 func (s *UDPService) Start(ctx context.Context) error {
-	// Ekstrak port dari localAddr jika ada
-	_, port, err := net.SplitHostPort(s.localAddr)
-	if err != nil {
-		// Jika tidak bisa di-parse, gunakan port default
-		port = fmt.Sprintf("%d", DefaultUDPPort)
-	}
-
-	// Gunakan port yang sama dengan gossip service untuk menghindari konflik
-	listenAddr := fmt.Sprintf(":%s", port)
+	// Selalu gunakan port 7946 (DefaultUDPPort) untuk komunikasi UDP
+	listenAddr := fmt.Sprintf(":%d", DefaultUDPPort)
 	
-	logrus.Infof("UDP service akan menggunakan port yang sama dengan gossip service: %s", listenAddr)
+	logrus.Infof("UDP service akan menggunakan port: %s", listenAddr)
 	
 	addr, err := net.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("gagal resolve alamat UDP: %w", err)
 	}
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		// Jika gagal mendengarkan pada port yang sama, gunakan port alternatif
-		altListenAddr := fmt.Sprintf(":%d", AlternativeUDPPort)
-		logrus.Warnf("Gagal listen pada port %s, mencoba port alternatif %s", listenAddr, altListenAddr)
-		
-		altAddr, err := net.ResolveUDPAddr("udp", altListenAddr)
-		if err != nil {
-			return fmt.Errorf("gagal resolve alamat UDP alternatif: %w", err)
+	// Implement retry with exponential backoff
+	var conn *net.UDPConn
+	var lastErr error
+	
+	for retries := 0; retries < 5; retries++ {
+		conn, err = net.ListenUDP("udp", addr)
+		if err == nil {
+			break // Successfully established connection
 		}
 		
-		conn, err = net.ListenUDP("udp", altAddr)
-		if err != nil {
-			return fmt.Errorf("gagal listen UDP pada port alternatif: %w", err)
+		lastErr = err
+		
+		// Check if this is a temporary error that might resolve with retry
+		if opErr, ok := err.(*net.OpError); ok {
+			if opErr.Temporary() {
+				backoffTime := time.Duration(1<<uint(retries)) * 100 * time.Millisecond
+				logrus.Warnf("Temporary error listening on UDP port %d, retrying in %v: %v", 
+					DefaultUDPPort, backoffTime, err)
+				time.Sleep(backoffTime)
+				continue
+			}
 		}
 		
-		// Update listenAddr ke port yang berhasil
-		s.config.ListenAddr = altListenAddr
-	} else {
-		s.config.ListenAddr = listenAddr
+		// Non-temporary error, no need to retry
+		return fmt.Errorf("gagal listen UDP pada port %d: %w", DefaultUDPPort, err)
 	}
 	
+	if conn == nil {
+		return fmt.Errorf("gagal listen UDP setelah beberapa percobaan: %w", lastErr)
+	}
+	
+	s.config.ListenAddr = listenAddr
 	s.conn = conn
 	logrus.Infof("UDP service listening on %s", s.config.ListenAddr)
 
@@ -176,22 +177,7 @@ func (s *UDPService) SendMessage(ctx context.Context, msg *Message, targetAddr s
 			
 			logrus.Warnf("Failed to send message to %s (attempt %d/%d): %v", targetAddr, i+1, maxRetries+1, err)
 			
-			// Jika error adalah connection refused, mungkin node sedang down atau port salah
-			// Coba gunakan port alternatif jika ini adalah port default
-			if strings.Contains(err.Error(), "koneksi ditolak") && strings.HasSuffix(targetAddr, fmt.Sprintf(":%d", DefaultUDPPort)) {
-				altTargetAddr := strings.TrimSuffix(targetAddr, fmt.Sprintf(":%d", DefaultUDPPort)) + fmt.Sprintf(":%d", AlternativeUDPPort)
-				logrus.Infof("Mencoba port alternatif: %s", altTargetAddr)
-				
-				// Kirim ke alamat alternatif
-				err = s.sendMessageRaw(msg, altTargetAddr)
-				if err == nil {
-					// Jika berhasil, gunakan alamat ini untuk menunggu respons
-					targetAddr = altTargetAddr
-				} else {
-					logrus.Warnf("Juga gagal mengirim ke port alternatif: %v", err)
-				}
-			}
-			
+			// Tidak perlu mencoba port alternatif, tetap gunakan port yang sama
 			continue
 		}
 		
@@ -253,32 +239,71 @@ func (s *UDPService) sendMessageRaw(msg *Message, targetAddr string) error {
 		return fmt.Errorf("gagal serialize pesan: %w", err)
 	}
 
-	// Set write deadline untuk menghindari blocking selamanya
-	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	
-	// Kirim pesan
-	_, err = s.conn.WriteToUDP(msgBytes, addr)
-	
-	// Reset write deadline
-	s.conn.SetWriteDeadline(time.Time{})
-	
-	if err != nil {
-		// Periksa apakah error adalah timeout atau connection refused
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return fmt.Errorf("timeout saat mengirim pesan ke %s", targetAddr)
-		} else if opErr, ok := err.(*net.OpError); ok {
-			if opErr.Timeout() {
-				return fmt.Errorf("timeout saat mengirim pesan ke %s", targetAddr)
-			} else if strings.Contains(opErr.Error(), "connection refused") {
-				return fmt.Errorf("koneksi ditolak saat mengirim pesan ke %s", targetAddr)
-			} else if strings.Contains(opErr.Error(), "network is unreachable") {
-				return fmt.Errorf("jaringan tidak dapat dijangkau saat mengirim pesan ke %s", targetAddr)
-			}
+	// Implement retry with exponential backoff
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		// Add backoff delay for retries
+		if retry > 0 {
+			backoffTime := time.Duration(1<<uint(retry-1)) * 200 * time.Millisecond
+			logrus.Debugf("Retrying UDP send to %s (attempt %d/%d) after %v", targetAddr, retry+1, maxRetries, backoffTime)
+			time.Sleep(backoffTime)
 		}
-		return fmt.Errorf("gagal kirim pesan ke %s: %w", targetAddr, err)
+		
+		// Set write deadline untuk menghindari blocking selamanya
+		s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		
+		// Kirim pesan
+		_, err = s.conn.WriteToUDP(msgBytes, addr)
+		
+		// Reset write deadline
+		s.conn.SetWriteDeadline(time.Time{})
+		
+		if err == nil {
+			// Message sent successfully
+			return nil
+		}
+		
+		// Handle different error types
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			logrus.Warnf("Timeout saat mengirim pesan ke %s (attempt %d/%d), will retry", 
+				targetAddr, retry+1, maxRetries)
+		} else if opErr, ok := err.(*net.OpError); ok {
+			if strings.Contains(opErr.Error(), "connection refused") {
+				logrus.Warnf("Koneksi ditolak saat mengirim pesan ke %s (attempt %d/%d)", 
+					targetAddr, retry+1, maxRetries)
+			} else if strings.Contains(opErr.Error(), "network is unreachable") {
+				logrus.Warnf("Jaringan tidak dapat dijangkau saat mengirim pesan ke %s (attempt %d/%d)", 
+					targetAddr, retry+1, maxRetries)
+			} else {
+				logrus.Warnf("Error mengirim pesan ke %s (attempt %d/%d): %v", 
+					targetAddr, retry+1, maxRetries, err)
+			}
+		} else {
+			logrus.Warnf("Unknown error mengirim pesan ke %s (attempt %d/%d): %v", 
+				targetAddr, retry+1, maxRetries, err)
+		}
+		
+		// Last retry failed
+		if retry == maxRetries-1 {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				return fmt.Errorf("timeout saat mengirim pesan ke %s setelah %d percobaan", 
+					targetAddr, maxRetries)
+			} else if opErr, ok := err.(*net.OpError); ok {
+				if strings.Contains(opErr.Error(), "connection refused") {
+					return fmt.Errorf("koneksi ditolak saat mengirim pesan ke %s setelah %d percobaan", 
+						targetAddr, maxRetries)
+				} else if strings.Contains(opErr.Error(), "network is unreachable") {
+					return fmt.Errorf("jaringan tidak dapat dijangkau saat mengirim pesan ke %s setelah %d percobaan", 
+						targetAddr, maxRetries)
+				}
+			}
+			return fmt.Errorf("gagal kirim pesan ke %s setelah %d percobaan: %w", 
+				targetAddr, maxRetries, err)
+		}
 	}
-
-	return nil
+	
+	// This should never be reached due to the return in the last retry case
+	return fmt.Errorf("gagal kirim pesan ke %s: unexpected error", targetAddr)
 }
 
 // listenForMessages mendengarkan pesan UDP yang masuk.
@@ -304,8 +329,13 @@ func (s *UDPService) listenForMessages(ctx context.Context) {
 				
 				// Untuk error lain, log dengan level debug saja untuk menghindari spam log
 				if opErr, ok := err.(*net.OpError); ok {
-					// Log dengan detail tipe error untuk debugging
-					logrus.Debugf("UDP service read error: %s (%T)", opErr.Error(), opErr.Err)
+					// Check for specific network errors that might be temporary
+					if opErr.Temporary() {
+						logrus.Debugf("Temporary UDP read error in UDP service: %s (%T)", opErr.Error(), opErr.Err)
+					} else {
+						// Log dengan detail tipe error untuk debugging
+						logrus.Debugf("UDP service read error: %s (%T)", opErr.Error(), opErr.Err)
+					}
 				} else {
 					logrus.Debugf("Non-timeout error reading from UDP in UDP service: %v", err)
 				}
@@ -315,8 +345,10 @@ func (s *UDPService) listenForMessages(ctx context.Context) {
 			// Reset read deadline
 			s.conn.SetReadDeadline(time.Time{})
 			
-			// Proses pesan dalam goroutine terpisah
-			go s.handleMessage(ctx, buf[:n], remoteAddr)
+			// Proses pesan dalam goroutine terpisah untuk menghindari blocking
+			msgCopy := make([]byte, n)
+			copy(msgCopy, buf[:n])
+			go s.handleMessage(ctx, msgCopy, remoteAddr)
 		}
 	}
 }
@@ -434,8 +466,11 @@ func (s *UDPService) GetListenAddr() string {
 }
 // UDPServiceFromGossip membuat instance UDPService yang menggunakan koneksi UDP dari GossipService
 func UDPServiceFromGossip(provider common.UDPProvider, clusterSecret string) *UDPService {
+	// Always use the DefaultUDPPort (7946) for consistency
+	listenAddr := fmt.Sprintf(":%d", DefaultUDPPort)
+	
 	config := Config{
-		ListenAddr:    provider.GetListenAddr(),
+		ListenAddr:    listenAddr,
 		ClusterSecret: clusterSecret,
 		MessageMaxAge: DefaultMessageMaxAge,
 	}
@@ -450,6 +485,13 @@ func UDPServiceFromGossip(provider common.UDPProvider, clusterSecret string) *UD
 		stopChan:    make(chan struct{}),
 	}
 	
+	// Log the shared connection details for debugging
+	if service.conn != nil {
+		logrus.Infof("UDPService sharing UDP connection from gossip service at local address: %s", service.conn.LocalAddr().String())
+	} else {
+		logrus.Warnf("UDPService received nil UDP connection from gossip service")
+	}
+	
 	return service
 }
 // StartWithExistingConn memulai service UDP dengan koneksi yang sudah ada
@@ -459,10 +501,20 @@ func (s *UDPService) StartWithExistingConn(ctx context.Context) error {
 		return fmt.Errorf("koneksi UDP tidak tersedia")
 	}
 	
+	// Make sure we're using the correct port in our configuration
+	s.config.ListenAddr = fmt.Sprintf(":%d", DefaultUDPPort)
+	
 	logrus.Infof("UDP service menggunakan koneksi UDP yang sama dengan gossip service pada %s", s.config.ListenAddr)
 	
+	// Set up a separate goroutine for listening to messages
+	// This is important even though the gossip service is also listening on the same connection
+	// because we need to handle UDP protocol specific messages
 	s.wg.Add(1)
 	go s.listenForMessages(ctx)
 	
 	return nil
+}
+// GetUDPConn mengembalikan koneksi UDP yang digunakan oleh service
+func (s *UDPService) GetUDPConn() *net.UDPConn {
+	return s.conn
 }

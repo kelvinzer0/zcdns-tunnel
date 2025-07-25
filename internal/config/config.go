@@ -8,6 +8,10 @@ import (
 type GossipConfig struct {
 	ProbeInterval string `mapstructure:"probe_interval"`
 	ProbeTimeout  string `mapstructure:"probe_timeout"`
+	GrpcPort      int    `mapstructure:"grpc_port"`
+	UseTLS        bool   `mapstructure:"use_tls"`
+	TLSCertFile   string `mapstructure:"tls_cert_file"`
+	TLSKeyFile    string `mapstructure:"tls_key_file"`
 }
 
 // ServerConfig holds all the configuration for the server
@@ -28,6 +32,10 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 	// Set default values for gossip configuration
 	viper.SetDefault("gossip.probe_interval", "1s")
 	viper.SetDefault("gossip.probe_timeout", "3s")
+	viper.SetDefault("gossip.grpc_port", 7946)
+	viper.SetDefault("gossip.use_tls", false)
+	viper.SetDefault("gossip.tls_cert_file", "")
+	viper.SetDefault("gossip.tls_key_file", "")
 
 	var config ServerConfig
 	if err := viper.ReadInConfig(); err != nil {
