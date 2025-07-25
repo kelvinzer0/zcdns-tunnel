@@ -14,6 +14,12 @@ service GossipService {
   
   // ForwardRequest is used to forward a tunnel request to the responsible node
   rpc ForwardRequest(ForwardRequestMessage) returns (ForwardResponseMessage) {}
+  
+  // ShareIntermediaryAddr is used to share intermediary address information between nodes
+  rpc ShareIntermediaryAddr(IntermediaryAddrMessage) returns (IntermediaryAddrResponse) {}
+  
+  // GetIntermediaryAddr is used to retrieve intermediary address information from other nodes
+  rpc GetIntermediaryAddr(IntermediaryAddrRequest) returns (IntermediaryAddrMessage) {}
 }
 
 // Node represents information about a cluster node
@@ -65,4 +71,28 @@ message ForwardResponseMessage {
   bool success = 2;
   uint32 port = 3;
   string error = 4;
+}
+// IntermediaryAddrMessage is sent to share intermediary address information
+message IntermediaryAddrMessage {
+  string domain = 1;
+  string protocol_prefix = 2;
+  uint32 public_port = 3;
+  string intermediary_addr = 4;
+  string forward_id = 5;
+  Node sender = 6;
+}
+
+// IntermediaryAddrResponse is the response to a share intermediary address request
+message IntermediaryAddrResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// IntermediaryAddrRequest is sent to request intermediary address information
+message IntermediaryAddrRequest {
+  string domain = 1;
+  string protocol_prefix = 2;
+  uint32 public_port = 3;
+  string forward_id = 4;
+  Node sender = 5;
 }

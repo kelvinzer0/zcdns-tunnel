@@ -141,7 +141,8 @@ func NewSSHServer(cfg config.ServerConfig, gs common.GossipProvider, localGossip
 
 	// If the gossip provider is a GRPCServer, register the server as the forward handler
 	if grpcServer, ok := gs.(*grpc.GRPCServer); ok {
-		grpcServer.SetForwardHandler(newSSHForwardHandler(server))
+		handler := newSSHForwardHandler(server)
+		grpcServer.SetForwardHandler(handler)
 		logrus.Info("Registered SSH server as gRPC forward handler")
 	}
 
@@ -413,6 +414,29 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 			return
 		}
 
+		// Try to get the intermediary address from the responsible node
+		// This is needed for the SSH handshake to work correctly
+		protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
+		if !ok {
+			protocolPrefix = ""
+		}
+
+		// Attempt to get the intermediary address from the responsible node
+		intermediaryAddr, err := s.getIntermediaryAddrFromResponsibleNode(ctx, domain, responsibleNode, forwardID, protocolPrefix, port)
+		if err != nil {
+			logrus.WithError(err).Warnf("Failed to get intermediary address from responsible node %s, SSH handshake may fail", responsibleNode)
+			// We'll continue without the intermediary address, but SSH handshake may fail
+		} else {
+			// Store the intermediary address in our local manager so it can be used when handling forwarded channels
+			s.Manager.StoreBridgeAddress(domain, protocolPrefix, port, intermediaryAddr)
+			logrus.WithFields(logrus.Fields{
+				"domain":           domain,
+				"protocol_prefix":  protocolPrefix,
+				"port":             port,
+				"intermediary_addr": intermediaryAddr,
+			}).Info("Stored intermediary address from responsible node")
+		}
+
 		// Relay the response back to the original client
 		req.Reply(ok, ssh.Marshal(struct{ Port uint32 }{Port: port}))
 		return
@@ -461,6 +485,52 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 
 		// 3. Store the mapping from the client's domain, protocol prefix, and public port to this new intermediary address.
 		s.Manager.StoreBridgeAddress(domain, protocolPrefix, payload.BindPort, actualIntermediaryAddr)
+
+		// Share the intermediary address with all active peers
+		if s.GRPCClient != nil {
+			activePeers := s.GossipService.GetActivePeerAddrs()
+			for _, peerAddr := range activePeers {
+				if peerAddr == s.LocalGossipAddr {
+					continue // Skip self
+				}
+				
+				// Extract host from peer address
+				host, _, err := net.SplitHostPort(peerAddr)
+				if err != nil {
+					logrus.Warnf("Failed to parse peer address %s: %v", peerAddr, err)
+					host = peerAddr // Use as is if parsing fails
+				}
+				
+				// Get the gRPC port from the configuration
+				grpcPort := int32(s.Config.Gossip.GrpcPort)
+				
+				// Generate a unique ID for this shared address
+				shareID := fmt.Sprintf("%s-%s-%d-%s", domain, protocolPrefix, payload.BindPort, sshConn.RemoteAddr().String())
+				
+				// Share the intermediary address with the peer
+				go func(host string, port int32, shareID string) {
+					shareCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					
+					_, err := s.GRPCClient.ShareIntermediaryAddrWithRetry(
+						shareCtx,
+						host,
+						port,
+						domain,
+						protocolPrefix,
+						payload.BindPort,
+						actualIntermediaryAddr,
+						shareID,
+					)
+					
+					if err != nil {
+						logrus.Warnf("Failed to share intermediary address with peer %s: %v", host, err)
+					} else {
+						logrus.Infof("Successfully shared intermediary address with peer %s", host)
+					}
+				}(host, grpcPort, shareID)
+			}
+		}
 
 		// 4. Ensure the main public SNIProxy listener exists.
 		sniProxy, exists := s.sniListeners[publicListenAddr]

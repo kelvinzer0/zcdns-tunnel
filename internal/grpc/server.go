@@ -480,3 +480,71 @@ func (s *GRPCServer) GetPeerUpdateChan() <-chan struct{} {
 func (s *GRPCServer) GetLocalAddr() string {
 	return s.localAddr
 }
+// ShareIntermediaryAddr handles a share intermediary address request from another node
+func (s *GRPCServer) ShareIntermediaryAddr(ctx context.Context, req *pb.IntermediaryAddrMessage) (*pb.IntermediaryAddrResponse, error) {
+	logrus.WithFields(logrus.Fields{
+		"domain":           req.Domain,
+		"protocol_prefix":  req.ProtocolPrefix,
+		"public_port":      req.PublicPort,
+		"intermediary_addr": req.IntermediaryAddr,
+		"forward_id":       req.ForwardId,
+		"sender":           req.Sender.Address,
+	}).Info("Received share intermediary address request")
+	
+	// Update the sender peer information
+	if req.Sender != nil {
+		s.updatePeer(req.Sender)
+	}
+	
+	// Store the intermediary address in the shared state
+	handler, ok := s.IntermediaryAddrHandlerInstance()
+	if !ok {
+		return &pb.IntermediaryAddrResponse{
+			Success: false,
+			Error:   "No handler available for intermediary address sharing",
+		}, nil
+	}
+	
+	success, err := handler.HandleShareIntermediaryAddr(ctx, req)
+	if err != nil {
+		return &pb.IntermediaryAddrResponse{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+	
+	return &pb.IntermediaryAddrResponse{
+		Success: success,
+	}, nil
+}
+
+// GetIntermediaryAddr handles a get intermediary address request from another node
+func (s *GRPCServer) GetIntermediaryAddr(ctx context.Context, req *pb.IntermediaryAddrRequest) (*pb.IntermediaryAddrMessage, error) {
+	logrus.WithFields(logrus.Fields{
+		"domain":          req.Domain,
+		"protocol_prefix": req.ProtocolPrefix,
+		"public_port":     req.PublicPort,
+		"forward_id":      req.ForwardId,
+		"sender":          req.Sender.Address,
+	}).Info("Received get intermediary address request")
+	
+	// Update the sender peer information
+	if req.Sender != nil {
+		s.updatePeer(req.Sender)
+	}
+	
+	// Get the intermediary address from the shared state
+	handler, ok := s.IntermediaryAddrHandlerInstance()
+	if !ok {
+		return &pb.IntermediaryAddrMessage{
+			Domain:          req.Domain,
+			ProtocolPrefix:  req.ProtocolPrefix,
+			PublicPort:      req.PublicPort,
+			IntermediaryAddr: "",
+			ForwardId:       req.ForwardId,
+			Sender:          req.Sender,
+		}, nil
+	}
+	
+	return handler.HandleGetIntermediaryAddr(ctx, req)
+}

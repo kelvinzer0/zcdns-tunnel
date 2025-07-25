@@ -464,6 +464,221 @@ func (x *ForwardResponseMessage) GetError() string {
 	return ""
 }
 
+// IntermediaryAddrMessage is sent to share intermediary address information
+type IntermediaryAddrMessage struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Domain           string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	ProtocolPrefix   string                 `protobuf:"bytes,2,opt,name=protocol_prefix,json=protocolPrefix,proto3" json:"protocol_prefix,omitempty"`
+	PublicPort       uint32                 `protobuf:"varint,3,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
+	IntermediaryAddr string                 `protobuf:"bytes,4,opt,name=intermediary_addr,json=intermediaryAddr,proto3" json:"intermediary_addr,omitempty"`
+	ForwardId        string                 `protobuf:"bytes,5,opt,name=forward_id,json=forwardId,proto3" json:"forward_id,omitempty"`
+	Sender           *Node                  `protobuf:"bytes,6,opt,name=sender,proto3" json:"sender,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *IntermediaryAddrMessage) Reset() {
+	*x = IntermediaryAddrMessage{}
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IntermediaryAddrMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IntermediaryAddrMessage) ProtoMessage() {}
+
+func (x *IntermediaryAddrMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IntermediaryAddrMessage.ProtoReflect.Descriptor instead.
+func (*IntermediaryAddrMessage) Descriptor() ([]byte, []int) {
+	return file_internal_grpc_proto_gossip_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *IntermediaryAddrMessage) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrMessage) GetProtocolPrefix() string {
+	if x != nil {
+		return x.ProtocolPrefix
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrMessage) GetPublicPort() uint32 {
+	if x != nil {
+		return x.PublicPort
+	}
+	return 0
+}
+
+func (x *IntermediaryAddrMessage) GetIntermediaryAddr() string {
+	if x != nil {
+		return x.IntermediaryAddr
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrMessage) GetForwardId() string {
+	if x != nil {
+		return x.ForwardId
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrMessage) GetSender() *Node {
+	if x != nil {
+		return x.Sender
+	}
+	return nil
+}
+
+// IntermediaryAddrResponse is the response to a share intermediary address request
+type IntermediaryAddrResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IntermediaryAddrResponse) Reset() {
+	*x = IntermediaryAddrResponse{}
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IntermediaryAddrResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IntermediaryAddrResponse) ProtoMessage() {}
+
+func (x *IntermediaryAddrResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IntermediaryAddrResponse.ProtoReflect.Descriptor instead.
+func (*IntermediaryAddrResponse) Descriptor() ([]byte, []int) {
+	return file_internal_grpc_proto_gossip_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *IntermediaryAddrResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *IntermediaryAddrResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+// IntermediaryAddrRequest is sent to request intermediary address information
+type IntermediaryAddrRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Domain         string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	ProtocolPrefix string                 `protobuf:"bytes,2,opt,name=protocol_prefix,json=protocolPrefix,proto3" json:"protocol_prefix,omitempty"`
+	PublicPort     uint32                 `protobuf:"varint,3,opt,name=public_port,json=publicPort,proto3" json:"public_port,omitempty"`
+	ForwardId      string                 `protobuf:"bytes,4,opt,name=forward_id,json=forwardId,proto3" json:"forward_id,omitempty"`
+	Sender         *Node                  `protobuf:"bytes,5,opt,name=sender,proto3" json:"sender,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *IntermediaryAddrRequest) Reset() {
+	*x = IntermediaryAddrRequest{}
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IntermediaryAddrRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IntermediaryAddrRequest) ProtoMessage() {}
+
+func (x *IntermediaryAddrRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_internal_grpc_proto_gossip_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IntermediaryAddrRequest.ProtoReflect.Descriptor instead.
+func (*IntermediaryAddrRequest) Descriptor() ([]byte, []int) {
+	return file_internal_grpc_proto_gossip_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *IntermediaryAddrRequest) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrRequest) GetProtocolPrefix() string {
+	if x != nil {
+		return x.ProtocolPrefix
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrRequest) GetPublicPort() uint32 {
+	if x != nil {
+		return x.PublicPort
+	}
+	return 0
+}
+
+func (x *IntermediaryAddrRequest) GetForwardId() string {
+	if x != nil {
+		return x.ForwardId
+	}
+	return ""
+}
+
+func (x *IntermediaryAddrRequest) GetSender() *Node {
+	if x != nil {
+		return x.Sender
+	}
+	return nil
+}
+
 var File_internal_grpc_proto_gossip_proto protoreflect.FileDescriptor
 
 const file_internal_grpc_proto_gossip_proto_rawDesc = "" +
@@ -504,11 +719,33 @@ const file_internal_grpc_proto_gossip_proto_rawDesc = "" +
 	"forward_id\x18\x01 \x01(\tR\tforwardId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x12\n" +
 	"\x04port\x18\x03 \x01(\rR\x04port\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error2\xff\x01\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\"\xf3\x01\n" +
+	"\x17IntermediaryAddrMessage\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x12'\n" +
+	"\x0fprotocol_prefix\x18\x02 \x01(\tR\x0eprotocolPrefix\x12\x1f\n" +
+	"\vpublic_port\x18\x03 \x01(\rR\n" +
+	"publicPort\x12+\n" +
+	"\x11intermediary_addr\x18\x04 \x01(\tR\x10intermediaryAddr\x12\x1d\n" +
+	"\n" +
+	"forward_id\x18\x05 \x01(\tR\tforwardId\x12*\n" +
+	"\x06sender\x18\x06 \x01(\v2\x12.zcdns.tunnel.NodeR\x06sender\"J\n" +
+	"\x18IntermediaryAddrResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"\xc6\x01\n" +
+	"\x17IntermediaryAddrRequest\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x12'\n" +
+	"\x0fprotocol_prefix\x18\x02 \x01(\tR\x0eprotocolPrefix\x12\x1f\n" +
+	"\vpublic_port\x18\x03 \x01(\rR\n" +
+	"publicPort\x12\x1d\n" +
+	"\n" +
+	"forward_id\x18\x04 \x01(\tR\tforwardId\x12*\n" +
+	"\x06sender\x18\x05 \x01(\v2\x12.zcdns.tunnel.NodeR\x06sender2\xd0\x03\n" +
 	"\rGossipService\x12?\n" +
 	"\x04Join\x12\x19.zcdns.tunnel.JoinRequest\x1a\x1a.zcdns.tunnel.JoinResponse\"\x00\x12N\n" +
 	"\tHeartbeat\x12\x1e.zcdns.tunnel.HeartbeatRequest\x1a\x1f.zcdns.tunnel.HeartbeatResponse\"\x00\x12]\n" +
-	"\x0eForwardRequest\x12#.zcdns.tunnel.ForwardRequestMessage\x1a$.zcdns.tunnel.ForwardResponseMessage\"\x00B\"Z zcdns-tunnel/internal/grpc/protob\x06proto3"
+	"\x0eForwardRequest\x12#.zcdns.tunnel.ForwardRequestMessage\x1a$.zcdns.tunnel.ForwardResponseMessage\"\x00\x12h\n" +
+	"\x15ShareIntermediaryAddr\x12%.zcdns.tunnel.IntermediaryAddrMessage\x1a&.zcdns.tunnel.IntermediaryAddrResponse\"\x00\x12e\n" +
+	"\x13GetIntermediaryAddr\x12%.zcdns.tunnel.IntermediaryAddrRequest\x1a%.zcdns.tunnel.IntermediaryAddrMessage\"\x00B\"Z zcdns-tunnel/internal/grpc/protob\x06proto3"
 
 var (
 	file_internal_grpc_proto_gossip_proto_rawDescOnce sync.Once
@@ -522,34 +759,43 @@ func file_internal_grpc_proto_gossip_proto_rawDescGZIP() []byte {
 	return file_internal_grpc_proto_gossip_proto_rawDescData
 }
 
-var file_internal_grpc_proto_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_internal_grpc_proto_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_internal_grpc_proto_gossip_proto_goTypes = []any{
-	(*Node)(nil),                   // 0: zcdns.tunnel.Node
-	(*JoinRequest)(nil),            // 1: zcdns.tunnel.JoinRequest
-	(*JoinResponse)(nil),           // 2: zcdns.tunnel.JoinResponse
-	(*HeartbeatRequest)(nil),       // 3: zcdns.tunnel.HeartbeatRequest
-	(*HeartbeatResponse)(nil),      // 4: zcdns.tunnel.HeartbeatResponse
-	(*ForwardRequestMessage)(nil),  // 5: zcdns.tunnel.ForwardRequestMessage
-	(*ForwardResponseMessage)(nil), // 6: zcdns.tunnel.ForwardResponseMessage
+	(*Node)(nil),                     // 0: zcdns.tunnel.Node
+	(*JoinRequest)(nil),              // 1: zcdns.tunnel.JoinRequest
+	(*JoinResponse)(nil),             // 2: zcdns.tunnel.JoinResponse
+	(*HeartbeatRequest)(nil),         // 3: zcdns.tunnel.HeartbeatRequest
+	(*HeartbeatResponse)(nil),        // 4: zcdns.tunnel.HeartbeatResponse
+	(*ForwardRequestMessage)(nil),    // 5: zcdns.tunnel.ForwardRequestMessage
+	(*ForwardResponseMessage)(nil),   // 6: zcdns.tunnel.ForwardResponseMessage
+	(*IntermediaryAddrMessage)(nil),  // 7: zcdns.tunnel.IntermediaryAddrMessage
+	(*IntermediaryAddrResponse)(nil), // 8: zcdns.tunnel.IntermediaryAddrResponse
+	(*IntermediaryAddrRequest)(nil),  // 9: zcdns.tunnel.IntermediaryAddrRequest
 }
 var file_internal_grpc_proto_gossip_proto_depIdxs = []int32{
-	0, // 0: zcdns.tunnel.JoinRequest.new_node:type_name -> zcdns.tunnel.Node
-	0, // 1: zcdns.tunnel.JoinResponse.known_peers:type_name -> zcdns.tunnel.Node
-	0, // 2: zcdns.tunnel.HeartbeatRequest.sender:type_name -> zcdns.tunnel.Node
-	0, // 3: zcdns.tunnel.HeartbeatRequest.known_peers:type_name -> zcdns.tunnel.Node
-	0, // 4: zcdns.tunnel.HeartbeatResponse.known_peers:type_name -> zcdns.tunnel.Node
-	0, // 5: zcdns.tunnel.ForwardRequestMessage.sender:type_name -> zcdns.tunnel.Node
-	1, // 6: zcdns.tunnel.GossipService.Join:input_type -> zcdns.tunnel.JoinRequest
-	3, // 7: zcdns.tunnel.GossipService.Heartbeat:input_type -> zcdns.tunnel.HeartbeatRequest
-	5, // 8: zcdns.tunnel.GossipService.ForwardRequest:input_type -> zcdns.tunnel.ForwardRequestMessage
-	2, // 9: zcdns.tunnel.GossipService.Join:output_type -> zcdns.tunnel.JoinResponse
-	4, // 10: zcdns.tunnel.GossipService.Heartbeat:output_type -> zcdns.tunnel.HeartbeatResponse
-	6, // 11: zcdns.tunnel.GossipService.ForwardRequest:output_type -> zcdns.tunnel.ForwardResponseMessage
-	9, // [9:12] is the sub-list for method output_type
-	6, // [6:9] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	0,  // 0: zcdns.tunnel.JoinRequest.new_node:type_name -> zcdns.tunnel.Node
+	0,  // 1: zcdns.tunnel.JoinResponse.known_peers:type_name -> zcdns.tunnel.Node
+	0,  // 2: zcdns.tunnel.HeartbeatRequest.sender:type_name -> zcdns.tunnel.Node
+	0,  // 3: zcdns.tunnel.HeartbeatRequest.known_peers:type_name -> zcdns.tunnel.Node
+	0,  // 4: zcdns.tunnel.HeartbeatResponse.known_peers:type_name -> zcdns.tunnel.Node
+	0,  // 5: zcdns.tunnel.ForwardRequestMessage.sender:type_name -> zcdns.tunnel.Node
+	0,  // 6: zcdns.tunnel.IntermediaryAddrMessage.sender:type_name -> zcdns.tunnel.Node
+	0,  // 7: zcdns.tunnel.IntermediaryAddrRequest.sender:type_name -> zcdns.tunnel.Node
+	1,  // 8: zcdns.tunnel.GossipService.Join:input_type -> zcdns.tunnel.JoinRequest
+	3,  // 9: zcdns.tunnel.GossipService.Heartbeat:input_type -> zcdns.tunnel.HeartbeatRequest
+	5,  // 10: zcdns.tunnel.GossipService.ForwardRequest:input_type -> zcdns.tunnel.ForwardRequestMessage
+	7,  // 11: zcdns.tunnel.GossipService.ShareIntermediaryAddr:input_type -> zcdns.tunnel.IntermediaryAddrMessage
+	9,  // 12: zcdns.tunnel.GossipService.GetIntermediaryAddr:input_type -> zcdns.tunnel.IntermediaryAddrRequest
+	2,  // 13: zcdns.tunnel.GossipService.Join:output_type -> zcdns.tunnel.JoinResponse
+	4,  // 14: zcdns.tunnel.GossipService.Heartbeat:output_type -> zcdns.tunnel.HeartbeatResponse
+	6,  // 15: zcdns.tunnel.GossipService.ForwardRequest:output_type -> zcdns.tunnel.ForwardResponseMessage
+	8,  // 16: zcdns.tunnel.GossipService.ShareIntermediaryAddr:output_type -> zcdns.tunnel.IntermediaryAddrResponse
+	7,  // 17: zcdns.tunnel.GossipService.GetIntermediaryAddr:output_type -> zcdns.tunnel.IntermediaryAddrMessage
+	13, // [13:18] is the sub-list for method output_type
+	8,  // [8:13] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_internal_grpc_proto_gossip_proto_init() }
@@ -563,7 +809,7 @@ func file_internal_grpc_proto_gossip_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_grpc_proto_gossip_proto_rawDesc), len(file_internal_grpc_proto_gossip_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

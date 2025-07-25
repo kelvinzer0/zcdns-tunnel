@@ -160,3 +160,46 @@ func (s *SSHServer) forwardToResponsibleNodeUDP(ctx context.Context, domain, res
 	
 	return true, respPayload.Port, nil
 }
+// getIntermediaryAddrFromResponsibleNode retrieves the intermediary address from the responsible node
+func (s *SSHServer) getIntermediaryAddrFromResponsibleNode(ctx context.Context, domain, responsibleNode, forwardID string, protocolPrefix string, publicPort uint32) (string, error) {
+	if s.GRPCClient == nil {
+		return "", fmt.Errorf("gRPC client is not initialized")
+	}
+
+	// Extract host from responsible node address
+	host, _, err := net.SplitHostPort(responsibleNode)
+	if err != nil {
+		logrus.Warnf("Failed to parse responsible node address %s: %v", responsibleNode, err)
+		host = responsibleNode // Use as is if parsing fails
+	}
+
+	// Get the gRPC port from the configuration
+	grpcPort := int32(s.Config.Gossip.GrpcPort)
+
+	logrus.Infof("Retrieving intermediary address for domain %s from node %s at address %s (gRPC port: %d)", 
+		domain, responsibleNode, host, grpcPort)
+
+	// Get the intermediary address using gRPC
+	intermediaryAddr, err := s.GRPCClient.GetIntermediaryAddrWithRetry(
+		ctx, 
+		host, 
+		grpcPort, 
+		domain, 
+		protocolPrefix, 
+		publicPort, 
+		forwardID,
+	)
+	
+	if err != nil {
+		return "", fmt.Errorf("failed to get intermediary address from %s: %w", responsibleNode, err)
+	}
+
+	if intermediaryAddr == "" {
+		return "", fmt.Errorf("no intermediary address found for domain %s on node %s", domain, responsibleNode)
+	}
+
+	logrus.Infof("Retrieved intermediary address %s for domain %s from node %s", 
+		intermediaryAddr, domain, responsibleNode)
+
+	return intermediaryAddr, nil
+}

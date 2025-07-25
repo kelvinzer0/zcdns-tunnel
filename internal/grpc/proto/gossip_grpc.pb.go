@@ -19,9 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	GossipService_Join_FullMethodName           = "/zcdns.tunnel.GossipService/Join"
-	GossipService_Heartbeat_FullMethodName      = "/zcdns.tunnel.GossipService/Heartbeat"
-	GossipService_ForwardRequest_FullMethodName = "/zcdns.tunnel.GossipService/ForwardRequest"
+	GossipService_Join_FullMethodName                  = "/zcdns.tunnel.GossipService/Join"
+	GossipService_Heartbeat_FullMethodName             = "/zcdns.tunnel.GossipService/Heartbeat"
+	GossipService_ForwardRequest_FullMethodName        = "/zcdns.tunnel.GossipService/ForwardRequest"
+	GossipService_ShareIntermediaryAddr_FullMethodName = "/zcdns.tunnel.GossipService/ShareIntermediaryAddr"
+	GossipService_GetIntermediaryAddr_FullMethodName   = "/zcdns.tunnel.GossipService/GetIntermediaryAddr"
 )
 
 // GossipServiceClient is the client API for GossipService service.
@@ -36,6 +38,10 @@ type GossipServiceClient interface {
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	// ForwardRequest is used to forward a tunnel request to the responsible node
 	ForwardRequest(ctx context.Context, in *ForwardRequestMessage, opts ...grpc.CallOption) (*ForwardResponseMessage, error)
+	// ShareIntermediaryAddr is used to share intermediary address information between nodes
+	ShareIntermediaryAddr(ctx context.Context, in *IntermediaryAddrMessage, opts ...grpc.CallOption) (*IntermediaryAddrResponse, error)
+	// GetIntermediaryAddr is used to retrieve intermediary address information from other nodes
+	GetIntermediaryAddr(ctx context.Context, in *IntermediaryAddrRequest, opts ...grpc.CallOption) (*IntermediaryAddrMessage, error)
 }
 
 type gossipServiceClient struct {
@@ -76,6 +82,26 @@ func (c *gossipServiceClient) ForwardRequest(ctx context.Context, in *ForwardReq
 	return out, nil
 }
 
+func (c *gossipServiceClient) ShareIntermediaryAddr(ctx context.Context, in *IntermediaryAddrMessage, opts ...grpc.CallOption) (*IntermediaryAddrResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IntermediaryAddrResponse)
+	err := c.cc.Invoke(ctx, GossipService_ShareIntermediaryAddr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gossipServiceClient) GetIntermediaryAddr(ctx context.Context, in *IntermediaryAddrRequest, opts ...grpc.CallOption) (*IntermediaryAddrMessage, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IntermediaryAddrMessage)
+	err := c.cc.Invoke(ctx, GossipService_GetIntermediaryAddr_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GossipServiceServer is the server API for GossipService service.
 // All implementations must embed UnimplementedGossipServiceServer
 // for forward compatibility.
@@ -88,6 +114,10 @@ type GossipServiceServer interface {
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	// ForwardRequest is used to forward a tunnel request to the responsible node
 	ForwardRequest(context.Context, *ForwardRequestMessage) (*ForwardResponseMessage, error)
+	// ShareIntermediaryAddr is used to share intermediary address information between nodes
+	ShareIntermediaryAddr(context.Context, *IntermediaryAddrMessage) (*IntermediaryAddrResponse, error)
+	// GetIntermediaryAddr is used to retrieve intermediary address information from other nodes
+	GetIntermediaryAddr(context.Context, *IntermediaryAddrRequest) (*IntermediaryAddrMessage, error)
 	mustEmbedUnimplementedGossipServiceServer()
 }
 
@@ -106,6 +136,12 @@ func (UnimplementedGossipServiceServer) Heartbeat(context.Context, *HeartbeatReq
 }
 func (UnimplementedGossipServiceServer) ForwardRequest(context.Context, *ForwardRequestMessage) (*ForwardResponseMessage, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ForwardRequest not implemented")
+}
+func (UnimplementedGossipServiceServer) ShareIntermediaryAddr(context.Context, *IntermediaryAddrMessage) (*IntermediaryAddrResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ShareIntermediaryAddr not implemented")
+}
+func (UnimplementedGossipServiceServer) GetIntermediaryAddr(context.Context, *IntermediaryAddrRequest) (*IntermediaryAddrMessage, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetIntermediaryAddr not implemented")
 }
 func (UnimplementedGossipServiceServer) mustEmbedUnimplementedGossipServiceServer() {}
 func (UnimplementedGossipServiceServer) testEmbeddedByValue()                       {}
@@ -182,6 +218,42 @@ func _GossipService_ForwardRequest_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _GossipService_ShareIntermediaryAddr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IntermediaryAddrMessage)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServiceServer).ShareIntermediaryAddr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GossipService_ShareIntermediaryAddr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServiceServer).ShareIntermediaryAddr(ctx, req.(*IntermediaryAddrMessage))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GossipService_GetIntermediaryAddr_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IntermediaryAddrRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServiceServer).GetIntermediaryAddr(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GossipService_GetIntermediaryAddr_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServiceServer).GetIntermediaryAddr(ctx, req.(*IntermediaryAddrRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // GossipService_ServiceDesc is the grpc.ServiceDesc for GossipService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -200,6 +272,14 @@ var GossipService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ForwardRequest",
 			Handler:    _GossipService_ForwardRequest_Handler,
+		},
+		{
+			MethodName: "ShareIntermediaryAddr",
+			Handler:    _GossipService_ShareIntermediaryAddr_Handler,
+		},
+		{
+			MethodName: "GetIntermediaryAddr",
+			Handler:    _GossipService_GetIntermediaryAddr_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

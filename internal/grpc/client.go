@@ -199,3 +199,147 @@ func (c *GRPCClient) ForwardRequestWithRetry(ctx context.Context, peerAddr strin
 	
 	return nil, fmt.Errorf("failed to forward request after %d attempts: %w", maxRetries, lastErr)
 }
+// ShareIntermediaryAddr shares an intermediary address with a peer
+func (c *GRPCClient) ShareIntermediaryAddr(ctx context.Context, peerAddr string, peerPort int32, domain, protocolPrefix string, publicPort uint32, intermediaryAddr, forwardID string) (bool, error) {
+	conn, err := c.dialPeer(peerAddr, peerPort)
+	if err != nil {
+		return false, fmt.Errorf("failed to dial peer %s:%d: %w", peerAddr, peerPort, err)
+	}
+	defer conn.Close()
+	
+	client := pb.NewGossipServiceClient(conn)
+	
+	// Create the share intermediary address request
+	req := &pb.IntermediaryAddrMessage{
+		Domain:          domain,
+		ProtocolPrefix:  protocolPrefix,
+		PublicPort:      publicPort,
+		IntermediaryAddr: intermediaryAddr,
+		ForwardId:       forwardID,
+		Sender: &pb.Node{
+			Address:    c.localAddr,
+			GossipPort: int32(c.config.GrpcPort),
+		},
+	}
+	
+	// Send the share intermediary address request
+	resp, err := client.ShareIntermediaryAddr(ctx, req)
+	if err != nil {
+		return false, fmt.Errorf("failed to share intermediary address with %s:%d: %w", peerAddr, peerPort, err)
+	}
+	
+	if !resp.Success {
+		return false, fmt.Errorf("share intermediary address rejected by %s:%d: %s", peerAddr, peerPort, resp.Error)
+	}
+	
+	return true, nil
+}
+
+// ShareIntermediaryAddrWithRetry shares an intermediary address with a peer with retry
+func (c *GRPCClient) ShareIntermediaryAddrWithRetry(ctx context.Context, peerAddr string, peerPort int32, domain, protocolPrefix string, publicPort uint32, intermediaryAddr, forwardID string) (bool, error) {
+	var lastErr error
+	maxRetries := 5
+	
+	for retry := 0; retry < maxRetries; retry++ {
+		// Add backoff delay for retries with exponential backoff
+		if retry > 0 {
+			backoffTime := time.Duration(1<<uint(retry-1)) * 500 * time.Millisecond
+			logrus.Infof("Retry %d/%d sharing intermediary address to %s:%d after %v", 
+				retry+1, maxRetries, peerAddr, peerPort, backoffTime)
+			time.Sleep(backoffTime)
+		}
+		
+		// Create a new context with increasing timeout for each retry
+		timeoutDuration := 5 * time.Second * time.Duration(retry+1)
+		if timeoutDuration > 20*time.Second {
+			timeoutDuration = 20 * time.Second // Cap at 20 seconds
+		}
+		
+		reqCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
+		success, err := c.ShareIntermediaryAddr(reqCtx, peerAddr, peerPort, domain, protocolPrefix, publicPort, intermediaryAddr, forwardID)
+		cancel()
+		
+		if err == nil {
+			return success, nil
+		}
+		
+		lastErr = err
+		logrus.Warnf("Failed to share intermediary address with %s:%d (attempt %d/%d): %v", 
+			peerAddr, peerPort, retry+1, maxRetries, err)
+	}
+	
+	return false, fmt.Errorf("failed to share intermediary address after %d attempts: %w", maxRetries, lastErr)
+}
+
+// GetIntermediaryAddr gets an intermediary address from a peer
+func (c *GRPCClient) GetIntermediaryAddr(ctx context.Context, peerAddr string, peerPort int32, domain, protocolPrefix string, publicPort uint32, forwardID string) (string, error) {
+	conn, err := c.dialPeer(peerAddr, peerPort)
+	if err != nil {
+		return "", fmt.Errorf("failed to dial peer %s:%d: %w", peerAddr, peerPort, err)
+	}
+	defer conn.Close()
+	
+	client := pb.NewGossipServiceClient(conn)
+	
+	// Create the get intermediary address request
+	req := &pb.IntermediaryAddrRequest{
+		Domain:         domain,
+		ProtocolPrefix: protocolPrefix,
+		PublicPort:     publicPort,
+		ForwardId:      forwardID,
+		Sender: &pb.Node{
+			Address:    c.localAddr,
+			GossipPort: int32(c.config.GrpcPort),
+		},
+	}
+	
+	// Send the get intermediary address request
+	resp, err := client.GetIntermediaryAddr(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("failed to get intermediary address from %s:%d: %w", peerAddr, peerPort, err)
+	}
+	
+	return resp.IntermediaryAddr, nil
+}
+
+// GetIntermediaryAddrWithRetry gets an intermediary address from a peer with retry
+func (c *GRPCClient) GetIntermediaryAddrWithRetry(ctx context.Context, peerAddr string, peerPort int32, domain, protocolPrefix string, publicPort uint32, forwardID string) (string, error) {
+	var lastErr error
+	maxRetries := 5
+	
+	for retry := 0; retry < maxRetries; retry++ {
+		// Add backoff delay for retries with exponential backoff
+		if retry > 0 {
+			backoffTime := time.Duration(1<<uint(retry-1)) * 500 * time.Millisecond
+			logrus.Infof("Retry %d/%d getting intermediary address from %s:%d after %v", 
+				retry+1, maxRetries, peerAddr, peerPort, backoffTime)
+			time.Sleep(backoffTime)
+		}
+		
+		// Create a new context with increasing timeout for each retry
+		timeoutDuration := 5 * time.Second * time.Duration(retry+1)
+		if timeoutDuration > 20*time.Second {
+			timeoutDuration = 20 * time.Second // Cap at 20 seconds
+		}
+		
+		reqCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
+		addr, err := c.GetIntermediaryAddr(reqCtx, peerAddr, peerPort, domain, protocolPrefix, publicPort, forwardID)
+		cancel()
+		
+		if err == nil && addr != "" {
+			return addr, nil
+		}
+		
+		if err != nil {
+			lastErr = err
+			logrus.Warnf("Failed to get intermediary address from %s:%d (attempt %d/%d): %v", 
+				peerAddr, peerPort, retry+1, maxRetries, err)
+		} else {
+			lastErr = fmt.Errorf("empty intermediary address received")
+			logrus.Warnf("Empty intermediary address received from %s:%d (attempt %d/%d)", 
+				peerAddr, peerPort, retry+1, maxRetries)
+		}
+	}
+	
+	return "", fmt.Errorf("failed to get intermediary address after %d attempts: %w", maxRetries, lastErr)
+}
