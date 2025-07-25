@@ -148,12 +148,6 @@ func (m *Message) Verify(secret []byte) bool {
 	return hmac.Equal(calculatedHMAC, originalHMAC)
 }
 
-// IsExpired memeriksa apakah pesan sudah kadaluarsa
-func (m *Message) IsExpired(maxAge time.Duration) bool {
-	msgTime := time.Unix(m.Timestamp, 0)
-	return time.Since(msgTime) > maxAge
-}
-
 // ParseMessage mem-parse pesan dari byte
 func ParseMessage(data []byte) (*Message, error) {
 	var msg Message

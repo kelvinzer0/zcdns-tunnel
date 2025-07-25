@@ -16,8 +16,6 @@ import (
 const (
 	// DefaultMessageTimeout adalah waktu maksimum untuk menunggu respons
 	DefaultMessageTimeout = 5 * time.Second
-	// DefaultMessageMaxAge adalah usia maksimum pesan yang valid
-	DefaultMessageMaxAge = 10 * time.Second
 	// DefaultUDPPort adalah port default untuk komunikasi UDP
 	DefaultUDPPort = 7946
 )
@@ -26,7 +24,6 @@ const (
 type Config struct {
 	ListenAddr    string
 	ClusterSecret string
-	MessageMaxAge time.Duration
 }
 
 // UDPService mengelola komunikasi antar node menggunakan protokol UDP kustom
@@ -47,10 +44,6 @@ type MessageHandler func(ctx context.Context, msg *Message) (*Message, error)
 
 // NewUDPService membuat instance UDPService baru
 func NewUDPService(config Config, localAddr string) *UDPService {
-	if config.MessageMaxAge == 0 {
-		config.MessageMaxAge = DefaultMessageMaxAge
-	}
-
 	return &UDPService{
 		config:      config,
 		localAddr:   localAddr,
@@ -361,12 +354,6 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 	// Jika tidak ada secret, skip verifikasi untuk meningkatkan performa
 	logrus.Debugf("Skipping signature verification for message from %s", remoteAddr.String())
 
-	// Periksa kadaluarsa
-	if msg.IsExpired(s.config.MessageMaxAge) {
-		logrus.Warnf("Pesan kadaluarsa dari %s", remoteAddr.String())
-		return
-	}
-
 	// Periksa apakah ini adalah respons untuk pesan yang tertunda
 	respKey := fmt.Sprintf("%s-%d", msg.Type, msg.Timestamp)
 	s.mu.RLock()
@@ -461,7 +448,6 @@ func UDPServiceFromGossip(provider common.UDPProvider) *UDPService {
 	config := Config{
 		ListenAddr:    listenAddr,
 		ClusterSecret: "", // Tidak menggunakan secret untuk meningkatkan performa
-		MessageMaxAge: DefaultMessageMaxAge,
 	}
 	
 	// Gunakan secret kosong untuk meningkatkan performa
