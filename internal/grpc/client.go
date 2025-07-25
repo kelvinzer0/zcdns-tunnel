@@ -32,11 +32,13 @@ func NewGRPCClient(cfg config.GossipConfig, localAddr string) *GRPCClient {
 // dialPeer creates a gRPC connection to a peer
 func (c *GRPCClient) dialPeer(addr string, port int32) (*grpc.ClientConn, error) {
 	target := fmt.Sprintf("%s:%d", addr, port)
+	logrus.Debugf("Attempting to dial gRPC peer at %s", target)
 	
 	// Configure dial options
 	opts := []grpc.DialOption{
 		grpc.WithBlock(),
-		grpc.WithTimeout(2 * time.Second),
+		// Increase timeout to 5 seconds
+		grpc.WithTimeout(5 * time.Second),
 	}
 	
 	// Add TLS if configured
@@ -47,8 +49,10 @@ func (c *GRPCClient) dialPeer(addr string, port int32) (*grpc.ClientConn, error)
 			InsecureSkipVerify: true,
 		})
 		opts = append(opts, grpc.WithTransportCredentials(creds))
+		logrus.Debugf("Using TLS for gRPC connection to %s", target)
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		logrus.Debugf("Using insecure credentials for gRPC connection to %s", target)
 	}
 	
 	// Add keepalive parameters
@@ -148,12 +152,11 @@ func (c *GRPCClient) ForwardRequest(ctx context.Context, peerAddr string, peerPo
 		},
 	}
 	
-	// Set a timeout for the request
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	// Use the timeout from the parent context
+	// The parent context should already have an appropriate timeout
 	
 	// Send the forward request
-	resp, err := client.ForwardRequest(ctxWithTimeout, req)
+	resp, err := client.ForwardRequest(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to forward request to %s:%d: %w", peerAddr, peerPort, err)
 	}
@@ -164,18 +167,27 @@ func (c *GRPCClient) ForwardRequest(ctx context.Context, peerAddr string, peerPo
 // ForwardRequestWithRetry forwards a request to a peer with retry
 func (c *GRPCClient) ForwardRequestWithRetry(ctx context.Context, peerAddr string, peerPort int32, domain, bindAddr string, bindPort uint32, forwardID, originalAddr string) (*pb.ForwardResponseMessage, error) {
 	var lastErr error
-	maxRetries := 3
+	maxRetries := 5  // Increased from 3 to 5
 	
 	for retry := 0; retry < maxRetries; retry++ {
-		// Add backoff delay for retries
+		// Add backoff delay for retries with exponential backoff
 		if retry > 0 {
-			backoffTime := time.Duration(retry) * 500 * time.Millisecond
+			backoffTime := time.Duration(1<<uint(retry-1)) * 500 * time.Millisecond
 			logrus.Infof("Retry %d/%d forwarding request to %s:%d after %v", 
 				retry+1, maxRetries, peerAddr, peerPort, backoffTime)
 			time.Sleep(backoffTime)
 		}
 		
-		resp, err := c.ForwardRequest(ctx, peerAddr, peerPort, domain, bindAddr, bindPort, forwardID, originalAddr)
+		// Create a new context with increasing timeout for each retry
+		timeoutDuration := 5 * time.Second * time.Duration(retry+1)
+		if timeoutDuration > 20*time.Second {
+			timeoutDuration = 20 * time.Second // Cap at 20 seconds
+		}
+		
+		reqCtx, cancel := context.WithTimeout(ctx, timeoutDuration)
+		resp, err := c.ForwardRequest(reqCtx, peerAddr, peerPort, domain, bindAddr, bindPort, forwardID, originalAddr)
+		cancel()
+		
 		if err == nil {
 			return resp, nil
 		}

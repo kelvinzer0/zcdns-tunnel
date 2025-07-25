@@ -301,6 +301,35 @@ func (gs *GossipService) listenForMessages() {
 
 // handleMessage memproses pesan gossip yang diterima.
 func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr) {
+	// First try to unmarshal as a regular JSON object to check the structure
+	var rawMsg map[string]interface{}
+	if err := json.Unmarshal(msgBytes, &rawMsg); err != nil {
+		logrus.Warnf("Failed to unmarshal raw message from %s: %v", remoteAddr.String(), err)
+		return
+	}
+	
+	// Check if payload is a string/[]byte or an object
+	if payload, ok := rawMsg["payload"]; ok {
+		// If payload is an object, convert it to a JSON string
+		if _, isMap := payload.(map[string]interface{}); isMap {
+			payloadBytes, err := json.Marshal(payload)
+			if err != nil {
+				logrus.Warnf("Failed to marshal payload object: %v", err)
+				return
+			}
+			rawMsg["payload"] = payloadBytes
+			
+			// Re-marshal the message with the fixed payload
+			fixedMsgBytes, err := json.Marshal(rawMsg)
+			if err != nil {
+				logrus.Warnf("Failed to re-marshal message: %v", err)
+				return
+			}
+			msgBytes = fixedMsgBytes
+		}
+	}
+	
+	// Now unmarshal as a GossipMessage
 	var msg GossipMessage
 	if err := json.Unmarshal(msgBytes, &msg); err != nil {
 		logrus.Warnf("Failed to unmarshal gossip message from %s: %v", remoteAddr.String(), err)

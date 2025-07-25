@@ -257,7 +257,19 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {
 	defer conn.Close()
 
+	// Set a timeout for the SSH handshake
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetDeadline(time.Now().Add(10 * time.Second))
+	}
+
+	// Try to establish SSH connection
 	sshConn, chans, reqs, err := ssh.NewServerConn(conn, sshConfig)
+	
+	// Reset the deadline after handshake
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetDeadline(time.Time{})
+	}
+	
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr":   conn.RemoteAddr(),

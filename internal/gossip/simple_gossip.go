@@ -222,25 +222,54 @@ func (m *SimpleGossipMessage) VerifyHMAC(secret []byte) bool {
 
 // handleMessage memproses pesan yang diterima
 func (gs *SimpleGossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr) {
-	// Coba unmarshal sebagai SimpleGossipMessage
-	var msg SimpleGossipMessage
-	if err := json.Unmarshal(msgBytes, &msg); err != nil {
-		// Coba unmarshal sebagai udpproto.Message (untuk kompatibilitas dengan UDPService)
+	// First try to unmarshal as a regular JSON object to check the structure
+	var rawMsg map[string]interface{}
+	if err := json.Unmarshal(msgBytes, &rawMsg); err != nil {
+		// If we can't unmarshal as JSON at all, try UDP protocol message
 		var udpMsg udpproto.Message
 		if err := json.Unmarshal(msgBytes, &udpMsg); err != nil {
 			logrus.Debugf("Failed to unmarshal message from %s: %v", remoteAddr.String(), err)
 			return
 		}
 		
-		// Verifikasi tanda tangan udpproto.Message
+		// Verify UDP message signature
 		if !udpMsg.Verify([]byte(gs.clusterSecret)) {
 			logrus.Warnf("Invalid signature for UDP message from %s", remoteAddr.String())
 			return
 		}
 		
-		// Jika ini adalah pesan UDP, kita tidak perlu memprosesnya di sini
-		// Pesan ini akan ditangani oleh UDPService
+		// If this is a UDP message, we don't need to process it here
+		// This message will be handled by the UDPService
 		logrus.Debugf("Received UDP message of type %s from %s, forwarding to UDP service", udpMsg.Type, remoteAddr.String())
+		// We don't have a handleUDPMessage method, so just return
+		return
+	}
+	
+	// Check if payload is a string/[]byte or an object
+	if payload, ok := rawMsg["payload"]; ok {
+		// If payload is an object, convert it to a JSON string
+		if _, isMap := payload.(map[string]interface{}); isMap {
+			payloadBytes, err := json.Marshal(payload)
+			if err != nil {
+				logrus.Warnf("Failed to marshal payload object: %v", err)
+				return
+			}
+			rawMsg["payload"] = payloadBytes
+			
+			// Re-marshal the message with the fixed payload
+			fixedMsgBytes, err := json.Marshal(rawMsg)
+			if err != nil {
+				logrus.Warnf("Failed to re-marshal message: %v", err)
+				return
+			}
+			msgBytes = fixedMsgBytes
+		}
+	}
+	
+	// Now unmarshal as a SimpleGossipMessage
+	var msg SimpleGossipMessage
+	if err := json.Unmarshal(msgBytes, &msg); err != nil {
+		logrus.Warnf("Failed to unmarshal simple gossip message from %s: %v", remoteAddr.String(), err)
 		return
 	}
 	
