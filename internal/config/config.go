@@ -26,7 +26,7 @@ func LoadServerConfig(path string) (ServerConfig, error) {
 
 	// Set default values for gossip configuration
 	viper.SetDefault("gossip.probe_interval", "1s")
-	viper.SetDefault("gossip.probe_timeout", "500ms")
+	viper.SetDefault("gossip.probe_timeout", "3s")
 
 	var config ServerConfig
 	if err := viper.ReadInConfig(); err != nil {

@@ -99,6 +99,7 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		sniListenerRefCounts:     make(map[string]int),
 		sniListenerCancel:        make(map[string]context.CancelFunc),
 		tcpListeners:             make(map[string]context.CancelFunc),
+		forwardedClientConns:     make(map[string]*gossh.ServerConn),
 	}
 }
 

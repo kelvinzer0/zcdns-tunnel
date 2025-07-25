@@ -6,4 +6,4 @@ inter_node_ssh_key_path: "./inter_node_ssh_key"
 # Gossip configuration for clustering (optional)
 gossip:
   probe_interval: 1s
-  probe_timeout: 500ms
+  probe_timeout: 3s
