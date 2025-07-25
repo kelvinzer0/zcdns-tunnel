@@ -1,6 +1,7 @@
 ssh_listen_addr: ":2222"
 ssh_host_key_path: "./ssh_host_rsa_key"
 validation_domain: "zcdns.id"
+inter_node_ssh_key_path: "./inter_node_ssh_key"
 
 # Gossip configuration for clustering (optional)
 gossip:

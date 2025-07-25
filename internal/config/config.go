@@ -12,10 +12,11 @@ type GossipConfig struct {
 
 // ServerConfig holds all the configuration for the server
 type ServerConfig struct {
-	SshListenAddr    string `mapstructure:"ssh_listen_addr"`
-	SshHostKeyPath   string `mapstructure:"ssh_host_key_path"`
-	ValidationDomain string `mapstructure:"validation_domain"`
-	Gossip           GossipConfig `mapstructure:"gossip"`
+	SshListenAddr      string `mapstructure:"ssh_listen_addr"`
+	SshHostKeyPath     string `mapstructure:"ssh_host_key_path"`
+	ValidationDomain   string `mapstructure:"validation_domain"`
+	InterNodeSSHKeyPath string `mapstructure:"inter_node_ssh_key_path"`
+	Gossip             GossipConfig `mapstructure:"gossip"`
 }
 
 // LoadServerConfig loads the server configuration from a file

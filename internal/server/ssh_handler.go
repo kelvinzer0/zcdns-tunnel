@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"zcdns-tunnel/internal/consistenthash"
 	"zcdns-tunnel/internal/gossip"
 	"zcdns-tunnel/internal/proxy"
+	"zcdns-tunnel/internal/ssh"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
 	"zcdns-tunnel/internal/tunnel"
 )
@@ -34,7 +36,7 @@ func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.Ne
 	case "direct-tcpip":
 		channelHandlers.HandleDirectTCPIP(sshConn, newChannel)
 	case "forwarded-tcpip":
-		channelHandlers.HandleForwardedTCPIP(sshConn, newChannel)
+		channelHandlers.HandleForwardedTCPIP(sshConn, newChannel, s.forwardedClientConns, &s.mu)
 	case "session":
 		channelHandlers.HandleSession(sshConn, newChannel)
 	default:
@@ -52,6 +54,8 @@ type SSHServer struct {
 	ConsistentHash  *consistenthash.Map
 	LocalGossipAddr string // The local address of this node for consistent hashing
 
+	interNodeSSHClientConfig *gossh.ClientConfig // SSH client config for inter-node communication
+
 	// For shared, public-facing listeners (0.0.0.0)
 	sniListeners         map[string]*proxy.SNIProxy
 	sniListenerRefCounts map[string]int
@@ -61,21 +65,40 @@ type SSHServer struct {
 	// and for intermediary listeners for shared forwards.
 	tcpListeners map[string]context.CancelFunc
 
+	// Map to store original client SSH connections for forwarded requests
+	forwardedClientConns map[string]*gossh.ServerConn
+
 	mu sync.Mutex
 }
 
 // NewSSHServer creates a new SSH server instance.
 func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossipAddr string) *SSHServer {
+	// Load inter-node SSH client key
+	interNodeSigner, err := auth.LoadHostKey(cfg.InterNodeSSHKeyPath)
+	if err != nil {
+		logrus.Fatalf("Failed to load inter-node SSH key: %v", err)
+	}
+
+	interNodeSSHClientConfig := &gossh.ClientConfig{
+		User: "inter-node", // A fixed username for inter-node communication
+		Auth: []gossh.AuthMethod{
+			gossh.PublicKeys(interNodeSigner),
+		},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(), // WARNING: Insecure for production. Consider known_hosts or custom validation.
+		Timeout:         5 * time.Second,
+	}
+
 	return &SSHServer{
-		Config:               cfg,
-		Manager:              tunnel.NewManager(),
-		GossipService:        gs,
-		ConsistentHash:       consistenthash.New(100, nil), // 100 virtual nodes per real node
-		LocalGossipAddr:      localGossipAddr,
-		sniListeners:         make(map[string]*proxy.SNIProxy),
-		sniListenerRefCounts: make(map[string]int),
-		sniListenerCancel:    make(map[string]context.CancelFunc),
-		tcpListeners:         make(map[string]context.CancelFunc),
+		Config:                   cfg,
+		Manager:                  tunnel.NewManager(),
+		GossipService:            gs,
+		ConsistentHash:           consistenthash.New(100, nil), // 100 virtual nodes per real node
+		LocalGossipAddr:          localGossipAddr,
+		interNodeSSHClientConfig: interNodeSSHClientConfig,
+		sniListeners:             make(map[string]*proxy.SNIProxy),
+		sniListenerRefCounts:     make(map[string]int),
+		sniListenerCancel:        make(map[string]context.CancelFunc),
+		tcpListeners:             make(map[string]context.CancelFunc),
 	}
 }
 
@@ -252,10 +275,48 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 			"domain":           domain,
 			"responsible_node": responsibleNode,
 			"current_node":     s.LocalGossipAddr,
-		}).Info("Domain is not handled by this node, forwarding request.")
-		// TODO: Implement actual forwarding of the SSH tcpip-forward request to the responsibleNode
-		// For now, we just deny the request as we cannot forward it.
-		req.Reply(false, nil)
+		}).Info("Domain is not handled by this node, forwarding request to responsible node.")
+
+		// Generate a unique ID for this forwarded request
+		forwardID := fmt.Sprintf("%s-%s-%d", sshConn.RemoteAddr().String(), payload.BindAddr, payload.BindPort)
+
+		// Store the original client's SSH connection for later use when the forwarded channel comes back
+		s.mu.Lock()
+		s.forwardedClientConns[forwardID] = sshConn
+		s.mu.Unlock()
+
+		// Establish SSH connection to the responsible node
+		conn, err := gossh.Dial("tcp", responsibleNode, s.interNodeSSHClientConfig)
+		if err != nil {
+			logrus.WithError(err).Errorf("Failed to dial responsible node %s for forwarding", responsibleNode)
+			req.Reply(false, nil)
+			return
+		}
+		defer conn.Close()
+
+		// Create a new payload for the inter-node request
+		interNodePayload := ssh.InterNodeForwardRequestPayload{
+			BindAddr:       payload.BindAddr,
+			BindPort:       payload.BindPort,
+			OriginalDomain: domain,
+			ForwardID:      forwardID,
+		}
+		interNodePayloadBytes, _ := json.Marshal(interNodePayload)
+
+		// Forward the tcpip-forward request to the responsible node
+		ok, responsePayload, err := conn.SendRequest("tcpip-forward", true, interNodePayloadBytes)
+		if err != nil {
+			logrus.WithError(err).Errorf("Failed to forward tcpip-forward request to %s", responsibleNode)
+			req.Reply(false, nil)
+			// Clean up the stored connection if forwarding failed
+			s.mu.Lock()
+			delete(s.forwardedClientConns, forwardID)
+			s.mu.Unlock()
+			return
+		}
+
+		// Relay the response back to the original client
+		req.Reply(ok, responsePayload)
 		return
 	}
 
