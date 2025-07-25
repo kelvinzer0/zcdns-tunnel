@@ -17,8 +17,8 @@ import (
 	"zcdns-tunnel/internal/consistenthash"
 	"zcdns-tunnel/internal/gossip"
 	"zcdns-tunnel/internal/proxy"
-	"zcdns-tunnel/internal/ssh"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
+	interNodeSSH "zcdns-tunnel/internal/ssh"
 	"zcdns-tunnel/internal/tunnel"
 )
 
@@ -295,7 +295,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		defer conn.Close()
 
 		// Create a new payload for the inter-node request
-		interNodePayload := ssh.InterNodeForwardRequestPayload{
+		interNodePayload := interNodeSSH.InterNodeForwardRequestPayload{
 			BindAddr:       payload.BindAddr,
 			BindPort:       payload.BindPort,
 			OriginalDomain: domain,

@@ -213,7 +213,7 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 	switch msg.Type {
 	case MessageTypeWhoAmI:
 		logrus.Debugf("Received WhoAmI from %s", remoteAddr.String())
-		payload, _ := json.Marshal(WhoAmIResponsePayload{PublicAddr: remoteAddr.String()})
+		payload, _ := json.Marshal(WhoAmIResponsePayload{PublicAddr: fmt.Sprintf("%s:%d", remoteAddr.IP.String(), DefaultGossipPort)})
 		respMsg := GossipMessage{
 			Type:    MessageTypeWhoAmIResponse,
 			Sender:  gs.localAddr,
@@ -351,6 +351,7 @@ func (gs *GossipService) checkPeerStatus() {
 					continue
 				}
 				if time.Since(peer.LastSeen) > gs.config.ProbeTimeout {
+					peer.MarkDead() // Mark as dead before collecting for deletion
 					deadPeers = append(deadPeers, addr)
 				}
 			}
