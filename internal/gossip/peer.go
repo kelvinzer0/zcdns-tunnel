@@ -7,17 +7,20 @@ import (
 
 // Peer merepresentasikan node lain dalam klaster.
 type Peer struct {
-	Addr      string    // IP:Port dari peer
-	LastSeen  time.Time // Kapan terakhir kali peer ini mengirim heartbeat
-	IsAlive   bool      // Status hidup/mati peer
-	mu        sync.RWMutex
+	Addr         string    // IP:Port dari peer
+	LastSeen     time.Time // Kapan terakhir kali peer ini mengirim heartbeat
+	IsAlive      bool      // Status hidup/mati peer
+	SSHListenAddr string   // SSH listen address of the peer
+	GossipPort   int       // Gossip port for direct communication
+	mu           sync.RWMutex
 }
 
 func NewPeer(addr string) *Peer {
 	return &Peer{
-		Addr:     addr,
-		LastSeen: time.Now(),
-		IsAlive:  true,
+		Addr:       addr,
+		LastSeen:   time.Now(),
+		IsAlive:    true,
+		GossipPort: DefaultGossipPort,
 	}
 }
 

@@ -22,12 +22,16 @@ type GossipMessage struct {
 
 // JoinPayload dikirim ketika node baru bergabung.
 type JoinPayload struct {
-	NewPeer string `json:"new_peer"` // IP:Port dari node yang baru bergabung
+	NewPeer      string `json:"new_peer"`       // IP:Port dari node yang baru bergabung
+	SSHListenAddr string `json:"ssh_listen_addr"` // SSH listen address of the new peer
+	GossipPort   int    `json:"gossip_port"`    // Gossip port for direct communication
 }
 
 // HeartbeatPayload dikirim secara berkala oleh node aktif.
 type HeartbeatPayload struct {
-	KnownPeers []string `json:"known_peers,omitempty"` // Subset peer yang diketahui pengirim
+	KnownPeers    []string `json:"known_peers,omitempty"` // Subset peer yang diketahui pengirim
+	SSHListenAddr string   `json:"ssh_listen_addr"`       // SSH listen address of the sender
+	GossipPort    int      `json:"gossip_port"`           // Gossip port for direct communication
 }
 
 // SyncPayload berisi daftar peer yang diketahui.

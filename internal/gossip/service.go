@@ -152,7 +152,10 @@ func (gs *GossipService) Stop() {
 
 // join mencoba bergabung dengan klaster menggunakan seed peers.
 func (gs *GossipService) join(seedPeers []string) {
-	joinPayload, _ := json.Marshal(JoinPayload{NewPeer: gs.localAddr})
+	joinPayload, _ := json.Marshal(JoinPayload{
+		NewPeer:      gs.localAddr,
+		GossipPort:   DefaultGossipPort,
+	})
 	msg := GossipMessage{
 		Type:    MessageTypeJoin,
 		Sender:  gs.localAddr,
@@ -176,10 +179,24 @@ func (gs *GossipService) sendMessage(msg []byte, targetAddr string) {
 		logrus.Errorf("Failed to resolve target address %s: %v", targetAddr, err)
 		return
 	}
+	
+	// Set a timeout for the UDP write operation
+	gs.conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	
 	_, err = gs.conn.WriteToUDP(msg, addr)
 	if err != nil {
-		logrus.Errorf("Failed to send message to %s: %v", targetAddr, err)
+		// Check if it's a timeout or connection refused error
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			logrus.Warnf("Timeout sending message to %s, peer may be unreachable", targetAddr)
+		} else if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "connection refused" {
+			logrus.Warnf("Connection refused when sending message to %s, peer may be down or port 7946 is blocked", targetAddr)
+		} else {
+			logrus.Errorf("Failed to send message to %s: %v", targetAddr, err)
+		}
 	}
+	
+	// Reset the write deadline
+	gs.conn.SetWriteDeadline(time.Time{})
 }
 
 // listenForMessages mendengarkan pesan UDP yang masuk.
@@ -230,7 +247,7 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 			return
 		}
 		logrus.Infof("Received JOIN from %s (new peer: %s)", msg.Sender, payload.NewPeer)
-		gs.updatePeer(payload.NewPeer)
+		gs.updatePeer(payload.NewPeer, payload.SSHListenAddr, payload.GossipPort)
 
 	case MessageTypeHeartbeat:
 		var payload HeartbeatPayload
@@ -240,8 +257,10 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 		}
 		logrus.Debugf("Received HEARTBEAT from %s. Known peers in payload: %v", msg.Sender, payload.KnownPeers)
 		for _, knownPeerAddr := range payload.KnownPeers {
-			gs.updatePeer(knownPeerAddr)
+			gs.updatePeer(knownPeerAddr, "", 0)
 		}
+		// Update sender with its SSH listen address and gossip port if provided
+		gs.updatePeer(msg.Sender, payload.SSHListenAddr, payload.GossipPort)
 
 	case MessageTypeSync:
 		var payload SyncPayload
@@ -251,19 +270,21 @@ func (gs *GossipService) handleMessage(msgBytes []byte, remoteAddr *net.UDPAddr)
 		}
 		logrus.Debugf("Received SYNC from %s. Full peer list: %v", msg.Sender, payload.Peers)
 		for _, syncPeerAddr := range payload.Peers {
-			gs.updatePeer(syncPeerAddr)
+			gs.updatePeer(syncPeerAddr, "", 0)
 		}
+		// Always update the sender
+		gs.updatePeer(msg.Sender, "", 0)
 
 	default:
 		logrus.Warnf("Received unknown gossip message type: '%s' from %s", msg.Type, remoteAddr.String())
 	}
 
 	// Perbarui status pengirim
-	gs.updatePeer(msg.Sender)
+	gs.updatePeer(msg.Sender, "", 0)
 }
 
 // updatePeer menambahkan atau memperbarui peer dalam daftar.
-func (gs *GossipService) updatePeer(peerAddr string) {
+func (gs *GossipService) updatePeer(peerAddr string, sshListenAddr string, gossipPort int) {
 	if peerAddr == "" || peerAddr == gs.localAddr {
 		return
 	}
@@ -273,10 +294,24 @@ func (gs *GossipService) updatePeer(peerAddr string) {
 
 	if peer, ok := gs.peers[peerAddr]; ok {
 		peer.UpdateLastSeen()
+		// Update additional information if provided
+		if sshListenAddr != "" {
+			peer.SSHListenAddr = sshListenAddr
+		}
+		if gossipPort > 0 {
+			peer.GossipPort = gossipPort
+		}
 	} else {
 		logrus.Infof("Discovered new peer: %s", peerAddr)
-		gs.peers[peerAddr] = NewPeer(peerAddr)
-		go gs.propagateNewPeer(peerAddr)
+		newPeer := NewPeer(peerAddr)
+		if sshListenAddr != "" {
+			newPeer.SSHListenAddr = sshListenAddr
+		}
+		if gossipPort > 0 {
+			newPeer.GossipPort = gossipPort
+		}
+		gs.peers[peerAddr] = newPeer
+		go gs.propagateNewPeer(peerAddr, sshListenAddr, gossipPort)
 		select {
 		case gs.PeerUpdateChan <- struct{}{}:
 		default:
@@ -285,8 +320,12 @@ func (gs *GossipService) updatePeer(peerAddr string) {
 }
 
 // propagateNewPeer mengirim pesan JOIN untuk peer baru ke subset peer yang diketahui.
-func (gs *GossipService) propagateNewPeer(newPeerAddr string) {
-	joinPayload, _ := json.Marshal(JoinPayload{NewPeer: newPeerAddr})
+func (gs *GossipService) propagateNewPeer(newPeerAddr string, sshListenAddr string, gossipPort int) {
+	joinPayload, _ := json.Marshal(JoinPayload{
+		NewPeer:      newPeerAddr,
+		SSHListenAddr: sshListenAddr,
+		GossipPort:   gossipPort,
+	})
 	msg := GossipMessage{
 		Type:    MessageTypeJoin,
 		Sender:  gs.localAddr,
@@ -316,7 +355,10 @@ func (gs *GossipService) sendHeartbeats() {
 				continue
 			}
 
-			heartbeatPayload, _ := json.Marshal(HeartbeatPayload{KnownPeers: gs.GetRandomPeers(maxPeersToSend, true)})
+			heartbeatPayload, _ := json.Marshal(HeartbeatPayload{
+				KnownPeers: gs.GetRandomPeers(maxPeersToSend, true),
+				GossipPort: DefaultGossipPort,
+			})
 			msg := GossipMessage{
 				Type:    MessageTypeHeartbeat,
 				Sender:  gs.localAddr,
@@ -412,4 +454,42 @@ func (gs *GossipService) GetPeerCount() int {
 	gs.peersMu.RLock()
 	defer gs.peersMu.RUnlock()
 	return len(gs.peers)
+}
+
+// isPortOpen checks if a TCP port is open on a given address
+func isPortOpen(address string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// GetPreferredConnectionAddress returns the best address to use for connecting to a peer
+func (gs *GossipService) GetPreferredConnectionAddress(peerAddr string) string {
+	gs.peersMu.RLock()
+	defer gs.peersMu.RUnlock()
+	
+	peer, exists := gs.peers[peerAddr]
+	if !exists {
+		return peerAddr // Default to the original address if peer not found
+	}
+	
+	// Extract the IP from the peer address (remove the port)
+	host, _, err := net.SplitHostPort(peerAddr)
+	if err != nil {
+		return peerAddr // Return original if we can't parse it
+	}
+	
+	// Try the gossip port first if it's known
+	if peer.GossipPort > 0 {
+		gossipAddr := fmt.Sprintf("%s:%d", host, peer.GossipPort)
+		if isPortOpen(gossipAddr, 2*time.Second) {
+			return gossipAddr
+		}
+	}
+	
+	// Fall back to the original address
+	return peerAddr
 }

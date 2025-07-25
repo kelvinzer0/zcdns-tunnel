@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // SSHAuthenticator provides a PublicKeyCallback for SSH server authentication.
@@ -20,11 +20,11 @@ func NewSSHAuthenticator(validationDomain string) *SSHAuthenticator {
 	}
 }
 
-// PublicKeyCallback returns a gossh.ServerConfig.PublicKeyCallback function
+// PublicKeyCallback returns a ssh.ServerConfig.PublicKeyCallback function
 // that handles public key authentication with CNAME and TXT record validation
 // using the embedded DomainValidator.
-func (a *SSHAuthenticator) PublicKeyCallback() func(conn gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
-	return func(conn gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
+func (a *SSHAuthenticator) PublicKeyCallback() func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+	return func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr": conn.RemoteAddr(),
 			"username":    conn.User(),
@@ -53,7 +53,7 @@ func (a *SSHAuthenticator) PublicKeyCallback() func(conn gossh.ConnMetadata, key
 		}
 
 		// Store the domain and protocol prefix in permissions for later use
-		return &gossh.Permissions{
+		return &ssh.Permissions{
 			Extensions: map[string]string{
 				"domain":         domain,
 				"protocol_prefix": protocolPrefix,

@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // DomainValidator performs CNAME and TXT record validation for SSH authentication.
@@ -23,7 +23,7 @@ func NewDomainValidator(validationDomain string) *DomainValidator {
 }
 
 // Validate performs CNAME and TXT record validation.
-func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey gossh.PublicKey) error {
+func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey ssh.PublicKey) error {
 	logrus.WithFields(logrus.Fields{
 		"remote_addr": remoteAddr,
 		"domain":      domain,
@@ -75,7 +75,7 @@ func (v *DomainValidator) Validate(domain string, remoteAddr net.Addr, publicKey
 		if strings.HasPrefix(record, "zcdns-ssh-key=") {
 			parts := strings.SplitN(record, "=", 2)
 			if len(parts) == 2 {
-				authKey, _, _, _, err := gossh.ParseAuthorizedKey([]byte(parts[1]))
+				authKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(parts[1]))
 				if err != nil {
 					logrus.WithFields(logrus.Fields{
 						"remote_addr":   remoteAddr,

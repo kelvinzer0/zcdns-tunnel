@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +11,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 
 	"zcdns-tunnel/internal/auth"
 	"zcdns-tunnel/internal/config"
@@ -31,7 +32,7 @@ type forwarder struct {
 	cancel             context.CancelFunc
 }
 
-func (s *SSHServer) handleChannel(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
+func (s *SSHServer) handleChannel(sshConn *ssh.ServerConn, newChannel ssh.NewChannel) {
 	switch newChannel.ChannelType() {
 	case "direct-tcpip":
 		channelHandlers.HandleDirectTCPIP(sshConn, newChannel)
@@ -54,7 +55,8 @@ type SSHServer struct {
 	ConsistentHash  *consistenthash.Map
 	LocalGossipAddr string // The local address of this node for consistent hashing
 
-	interNodeSSHClientConfig *gossh.ClientConfig // SSH client config for inter-node communication
+	interNodeSSHClientConfig *ssh.ClientConfig // SSH client config for inter-node communication
+	interNodeSigner          ssh.Signer        // SSH signer for inter-node communication
 
 	// For shared, public-facing listeners (0.0.0.0)
 	sniListeners         map[string]*proxy.SNIProxy
@@ -66,7 +68,7 @@ type SSHServer struct {
 	tcpListeners map[string]context.CancelFunc
 
 	// Map to store original client SSH connections for forwarded requests
-	forwardedClientConns map[string]*gossh.ServerConn
+	forwardedClientConns map[string]*ssh.ServerConn
 
 	mu sync.Mutex
 }
@@ -79,12 +81,12 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		logrus.Fatalf("Failed to load inter-node SSH key: %v", err)
 	}
 
-	interNodeSSHClientConfig := &gossh.ClientConfig{
+	interNodeSSHClientConfig := &ssh.ClientConfig{
 		User: "inter-node", // A fixed username for inter-node communication
-		Auth: []gossh.AuthMethod{
-			gossh.PublicKeys(interNodeSigner),
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(interNodeSigner),
 		},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(), // WARNING: Insecure for production. Consider known_hosts or custom validation.
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // WARNING: Insecure for production. Consider known_hosts or custom validation.
 		Timeout:         5 * time.Second,
 	}
 
@@ -95,11 +97,12 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		ConsistentHash:           consistenthash.New(100, nil), // 100 virtual nodes per real node
 		LocalGossipAddr:          localGossipAddr,
 		interNodeSSHClientConfig: interNodeSSHClientConfig,
+		interNodeSigner:          interNodeSigner,
 		sniListeners:             make(map[string]*proxy.SNIProxy),
 		sniListenerRefCounts:     make(map[string]int),
 		sniListenerCancel:        make(map[string]context.CancelFunc),
 		tcpListeners:             make(map[string]context.CancelFunc),
-		forwardedClientConns:     make(map[string]*gossh.ServerConn),
+		forwardedClientConns:     make(map[string]*ssh.ServerConn),
 	}
 }
 
@@ -112,9 +115,9 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 		return fmt.Errorf("failed to load SSH host key: %w", err)
 	}
 
-	sshConfig := &gossh.ServerConfig{
+	sshConfig := &ssh.ServerConfig{
 		PublicKeyCallback: auth.NewSSHAuthenticator(s.Config.ValidationDomain).PublicKeyCallback(),
-		Config:            gossh.Config{},
+		Config:            ssh.Config{},
 	}
 	sshConfig.AddHostKey(hostSigner)
 
@@ -148,13 +151,53 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	s.mu.Unlock()
 
 	listener := NewSSHListener(s.Config.SshListenAddr, sshConfig)
-	return listener.ListenAndServe(ctx, s.handleSSHConnection)
+	go func() {
+		if err := listener.ListenAndServe(ctx, s.handleSSHConnection); err != nil {
+			logrus.WithError(err).Error("Main SSH listener exited with error")
+		}
+	}()
+
+	// Start inter-node SSH listener on gossip port
+	interNodeSSHConfig := &ssh.ServerConfig{
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			// Only allow the inter-node SSH key for authentication
+			if bytes.Equal(key.Marshal(), s.interNodeSigner.PublicKey().Marshal()) {
+				logrus.WithFields(logrus.Fields{
+					"remote_addr": conn.RemoteAddr(),
+					"user":        conn.User(),
+				}).Info("Inter-node SSH authentication successful")
+				return &ssh.Permissions{Extensions: map[string]string{"user": conn.User()}}, nil
+			}
+			logrus.WithFields(logrus.Fields{
+				"remote_addr": conn.RemoteAddr(),
+				"user":        conn.User(),
+				"fingerprint": ssh.FingerprintSHA256(key),
+			}).Warn("Inter-node SSH authentication failed: unauthorized key")
+			return nil, fmt.Errorf("unknown public key for inter-node communication")
+		},
+		Config: ssh.Config{},
+	}
+	// Add the host key for the inter-node listener (same as main listener)
+	interNodeSSHConfig.AddHostKey(hostSigner)
+
+	interNodeListener := NewSSHListener(fmt.Sprintf(":%d", gossip.DefaultGossipPort), interNodeSSHConfig)
+	go func() {
+		logrus.Infof("Starting inter-node SSH listener on :%d", gossip.DefaultGossipPort)
+		if err := interNodeListener.ListenAndServe(ctx, s.handleSSHConnection); err != nil {
+			logrus.WithError(err).Error("Inter-node SSH listener exited with error")
+		}
+	}()
+
+	// Wait for context to be cancelled to gracefully shut down both listeners
+	<-ctx.Done()
+	logrus.Info("SSH servers shutting down.")
+	return nil
 }
 
-func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerConfig) {
+func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {
 	defer conn.Close()
 
-	sshConn, chans, reqs, err := gossh.NewServerConn(conn, sshConfig)
+	sshConn, chans, reqs, err := ssh.NewServerConn(conn, sshConfig)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr":   conn.RemoteAddr(),
@@ -221,14 +264,14 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *gossh.ServerCo
 	}
 }
 
-func (s *SSHServer) handleGlobalRequests(ctx context.Context, sshConn *gossh.ServerConn, reqs <-chan *gossh.Request, activeForwards map[string]*forwarder) {
+func (s *SSHServer) handleGlobalRequests(ctx context.Context, sshConn *ssh.ServerConn, reqs <-chan *ssh.Request, activeForwards map[string]*forwarder) {
 	domain, ok := sshConn.Permissions.Extensions["domain"]
 	if !ok || domain == "" {
 		return
 	}
 
 	for req := range reqs {
-		go func(req *gossh.Request) {
+		go func(req *ssh.Request) {
 			switch req.Type {
 			case "tcpip-forward":
 				s.handleTCPIPForward(ctx, sshConn, req, activeForwards, domain)
@@ -243,12 +286,12 @@ func (s *SSHServer) handleGlobalRequests(ctx context.Context, sshConn *gossh.Ser
 	}
 }
 
-func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.ServerConn, req *gossh.Request, activeForwards map[string]*forwarder, domain string) {
+func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerConn, req *ssh.Request, activeForwards map[string]*forwarder, domain string) {
 	var payload struct {
 		BindAddr string
 		BindPort uint32
 	}
-	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+	if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
 		req.Reply(false, nil)
 		return
 	}
@@ -266,7 +309,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 	if responsibleNode == "" {
 		logrus.WithFields(logrus.Fields{
 			"domain": domain,
-		}).Error("No responsible node found for domain in consistent hash ring.")
+		}).Error("No responsible node found for domain in consistent hash ring. Make sure the gossip protocol is working correctly and at least one node is active.")
 		req.Reply(false, nil)
 		return
 	}
@@ -287,11 +330,36 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		s.mu.Unlock()
 
 		// Establish SSH connection to the responsible node
-		conn, err := gossh.Dial("tcp", responsibleNode, s.interNodeSSHClientConfig)
+		responsibleNodeAddr := s.GossipService.GetPreferredConnectionAddress(responsibleNode)
+		logrus.Infof("Attempting to connect to responsible node at %s", responsibleNodeAddr)
+		
+		conn, err := ssh.Dial("tcp", responsibleNodeAddr, s.interNodeSSHClientConfig)
 		if err != nil {
-			logrus.WithError(err).Errorf("Failed to dial responsible node %s for forwarding", responsibleNode)
-			req.Reply(false, nil)
-			return
+			logrus.WithError(err).Errorf("Failed to dial responsible node %s for forwarding", responsibleNodeAddr)
+			
+			// Try a direct connection to the gossip port as a fallback
+			host, _, _ := net.SplitHostPort(responsibleNode)
+			fallbackAddr := fmt.Sprintf("%s:%d", host, gossip.DefaultGossipPort)
+			if fallbackAddr != responsibleNodeAddr {
+				logrus.Infof("Trying fallback connection to %s", fallbackAddr)
+				conn, err = ssh.Dial("tcp", fallbackAddr, s.interNodeSSHClientConfig)
+				if err != nil {
+					logrus.WithError(err).Errorf("Failed to dial responsible node %s using fallback address", fallbackAddr)
+					req.Reply(false, nil)
+					// Clean up the stored connection if forwarding failed
+					s.mu.Lock()
+					delete(s.forwardedClientConns, forwardID)
+					s.mu.Unlock()
+					return
+				}
+			} else {
+				req.Reply(false, nil)
+				// Clean up the stored connection if forwarding failed
+				s.mu.Lock()
+				delete(s.forwardedClientConns, forwardID)
+				s.mu.Unlock()
+				return
+			}
 		}
 		defer conn.Close()
 
@@ -420,7 +488,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 		}
 
 		s.Manager.StoreUserBindingPort(domain, payload.BindPort)
-		req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: publicPort}))
+		req.Reply(true, ssh.Marshal(struct{ Port uint32 }{Port: publicPort}))
 		logrus.WithFields(logrus.Fields{"public_port": publicPort, "domain": domain}).Info("Shared forward request acknowledged")
 
 		return
@@ -458,16 +526,16 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *gossh.Serve
 	}
 
 	s.Manager.StoreUserBindingPort(domain, actualPort)
-	req.Reply(true, gossh.Marshal(struct{ Port uint32 }{Port: actualPort}))
+	req.Reply(true, ssh.Marshal(struct{ Port uint32 }{Port: actualPort}))
 	logrus.WithField("actual_port", actualPort).Info("Dedicated forward established")
 }
 
-func (s *SSHServer) handleCancelTCPIPForward(req *gossh.Request, activeForwards map[string]*forwarder) {
+func (s *SSHServer) handleCancelTCPIPForward(req *ssh.Request, activeForwards map[string]*forwarder) {
 	var payload struct {
 		BindAddr string
 		BindPort uint32
 	}
-	if err := gossh.Unmarshal(req.Payload, &payload); err != nil {
+	if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
 		req.Reply(false, nil)
 		return
 	}

@@ -6,18 +6,18 @@ import (
 	"net"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // SSHListener is responsible for listening for new SSH connections.
 type SSHListener struct {
 	addr     string
-	config   *gossh.ServerConfig
+	config   *ssh.ServerConfig
 	listener net.Listener
 }
 
 // NewSSHListener creates a new SSHListener.
-func NewSSHListener(addr string, config *gossh.ServerConfig) *SSHListener {
+func NewSSHListener(addr string, config *ssh.ServerConfig) *SSHListener {
 	return &SSHListener{
 		addr:     addr,
 		config:   config,
@@ -26,7 +26,7 @@ func NewSSHListener(addr string, config *gossh.ServerConfig) *SSHListener {
 
 // ListenAndServe starts the SSH listener and accepts connections.
 // It calls the provided handler function for each new connection.
-func (l *SSHListener) ListenAndServe(ctx context.Context, handler func(net.Conn, *gossh.ServerConfig)) error {
+func (l *SSHListener) ListenAndServe(ctx context.Context, handler func(net.Conn, *ssh.ServerConfig)) error {
 	logrus.Printf("Starting SSH listener on %s", l.addr)
 
 	listener, err := net.Listen("tcp", l.addr)

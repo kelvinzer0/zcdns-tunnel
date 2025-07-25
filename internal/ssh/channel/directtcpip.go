@@ -7,17 +7,17 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // HandleDirectTCPIP handles the "direct-tcpip" SSH channel type.
-func HandleDirectTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
+func HandleDirectTCPIP(sshConn *ssh.ServerConn, newChannel ssh.NewChannel) {
 	domain, ok := sshConn.Permissions.Extensions["domain"]
 	if !ok || domain == "" {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr": sshConn.RemoteAddr(),
 		}).Error("No domain found in SSH connection permissions")
-		newChannel.Reject(gossh.Prohibited, "internal server error")
+		newChannel.Reject(ssh.Prohibited, "internal server error")
 		return
 	}
 
@@ -27,12 +27,12 @@ func HandleDirectTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
 		OriginatorIP   string
 		OriginatorPort uint32
 	}
-	if err := gossh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr":   sshConn.RemoteAddr(),
 			logrus.ErrorKey: err,
 		}).Error("Failed to unmarshal direct-tcpip request")
-		newChannel.Reject(gossh.Prohibited, "invalid payload")
+		newChannel.Reject(ssh.Prohibited, "invalid payload")
 		return
 	}
 
@@ -56,7 +56,7 @@ func HandleDirectTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
 			"backend_addr":  backendAddr,
 			logrus.ErrorKey: err,
 		}).Error("Failed to connect to backend")
-		newChannel.Reject(gossh.ConnectionFailed, "failed to connect to backend")
+		newChannel.Reject(ssh.ConnectionFailed, "failed to connect to backend")
 		return
 	}
 
@@ -69,7 +69,7 @@ func HandleDirectTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel) {
 		backendConn.Close()
 		return
 	}
-	go gossh.DiscardRequests(requests)
+	go ssh.DiscardRequests(requests)
 
 	logrus.WithFields(logrus.Fields{
 		"remote_addr":  sshConn.RemoteAddr(),

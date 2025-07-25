@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 
 	interNodeSSH "zcdns-tunnel/internal/ssh"
 )
@@ -13,16 +13,16 @@ import (
 // HandleForwardedTCPIP handles the "forwarded-tcpip" SSH channel type.
 // This function is called on the *intermediate* node when the responsible node
 // opens a forwarded channel back to it.
-func HandleForwardedTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel, forwardedClientConns map[string]*gossh.ServerConn, mu *sync.Mutex) {
+func HandleForwardedTCPIP(sshConn *ssh.ServerConn, newChannel ssh.NewChannel, forwardedClientConns map[string]*ssh.ServerConn, mu *sync.Mutex) {
 	// The extra data for a forwarded-tcpip channel from another zcdns-tunnel node
 	// will contain our custom InterNodeForwardedChannelPayload.
 	var req interNodeSSH.InterNodeForwardedChannelPayload
-	if err := gossh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
+	if err := ssh.Unmarshal(newChannel.ExtraData(), &req); err != nil {
 		logrus.WithFields(logrus.Fields{
 			"remote_addr":   sshConn.RemoteAddr(),
 			logrus.ErrorKey: err,
 		}).Error("Failed to unmarshal inter-node forwarded-tcpip request")
-		newChannel.Reject(gossh.Prohibited, "invalid payload")
+		newChannel.Reject(ssh.Prohibited, "invalid payload")
 		return
 	}
 
@@ -45,7 +45,7 @@ func HandleForwardedTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel
 	}
 	defer channel.Close()
 
-	go gossh.DiscardRequests(requests)
+	go ssh.DiscardRequests(requests)
 
 	// Retrieve the original client's SSH connection using the ForwardID
 	mu.Lock()
@@ -55,7 +55,7 @@ func HandleForwardedTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel
 		logrus.WithFields(logrus.Fields{
 			"forward_id": req.ForwardID,
 		}).Error("Original client connection not found for forwarded channel.")
-		newChannel.Reject(gossh.UnknownChannelType, "original client connection not found")
+		newChannel.Reject(ssh.UnknownChannelType, "original client connection not found")
 		return
 	}
 	delete(forwardedClientConns, req.ForwardID) // Clean up the map entry
@@ -65,7 +65,7 @@ func HandleForwardedTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel
 	// The payload for direct-tcpip is: address to connect, port to connect, originator address, originator port
 	directChannel, directRequests, err := originalClientConn.OpenChannel(
 		"direct-tcpip",
-		gossh.Marshal(
+		ssh.Marshal(
 			struct {
 				DestAddr       string
 				DestPort       uint32
@@ -84,7 +84,7 @@ func HandleForwardedTCPIP(sshConn *gossh.ServerConn, newChannel gossh.NewChannel
 		return
 	}
 	defer directChannel.Close()
-	go gossh.DiscardRequests(directRequests)
+	go ssh.DiscardRequests(directRequests)
 
 	logrus.WithFields(logrus.Fields{
 		"forward_id": req.ForwardID,

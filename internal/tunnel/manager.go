@@ -6,14 +6,14 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
-	gossh "golang.org/x/crypto/ssh"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // Manager handles the lifecycle of active SSH client connections and their associated
 // remote forwarded ports.
 type Manager struct {
 	// activeClients maps domain to the SSH server connection handling it
-	activeClients sync.Map // map[string]*gossh.ServerConn
+	activeClients sync.Map // map[string]*ssh.ServerConn
 
 	// remoteListeners maps "bind_addr:bind_port" to RemoteForwardedPort
 	remoteListeners sync.Map // map[string]*RemoteForwardedPort
@@ -43,7 +43,7 @@ func NewManager() *Manager {
 }
 
 // StoreClient stores an active SSH client connection.
-func (m *Manager) StoreClient(domain string, conn *gossh.ServerConn) {
+func (m *Manager) StoreClient(domain string, conn *ssh.ServerConn) {
 	m.activeClients.Store(domain, conn)
 	logrus.WithFields(logrus.Fields{
 		"domain": domain,
@@ -51,17 +51,17 @@ func (m *Manager) StoreClient(domain string, conn *gossh.ServerConn) {
 }
 
 // LoadClient loads an active SSH client connection by domain.
-func (m *Manager) LoadClient(domain string) (*gossh.ServerConn, bool) {
+func (m *Manager) LoadClient(domain string) (*ssh.ServerConn, bool) {
 	client, ok := m.activeClients.Load(domain)
 	if !ok {
 		return nil, false
 	}
-	sshConn, ok := client.(*gossh.ServerConn)
+	sshConn, ok := client.(*ssh.ServerConn)
 	return sshConn, ok
 }
 
 // DeleteClient deletes an active SSH client connection and cleans up associated remote listeners.
-func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
+func (m *Manager) DeleteClient(domain string, sshConn *ssh.ServerConn) {
 	m.activeClients.Delete(domain)
 	logrus.WithFields(logrus.Fields{
 		"domain": domain,
@@ -102,7 +102,7 @@ func (m *Manager) DeleteClient(domain string, sshConn *gossh.ServerConn) {
 }
 
 // StoreRemoteListener stores a remote forwarded port listener.
-func (m *Manager) StoreRemoteListener(addr string, listener net.Listener, sshConn *gossh.ServerConn) error {
+func (m *Manager) StoreRemoteListener(addr string, listener net.Listener, sshConn *ssh.ServerConn) error {
 	// Check if port is already in use or reserved
 	if _, loaded := m.remoteListeners.LoadOrStore(addr, nil); loaded {
 		return fmt.Errorf("port %s already in use for remote forwarding", addr)
@@ -250,5 +250,5 @@ func (m *Manager) DeleteBridgeAddress(domain, protocolPrefix string, publicPort 
 // RemoteForwardedPort represents a port opened for remote forwarding on the server.
 type RemoteForwardedPort struct {
 	Listener net.Listener
-	SshConn  *gossh.ServerConn
+	SshConn  *ssh.ServerConn
 }
