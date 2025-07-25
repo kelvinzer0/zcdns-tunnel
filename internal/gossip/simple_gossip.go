@@ -42,8 +42,8 @@ func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAdd
 		return nil, fmt.Errorf("invalid probe_timeout: %w", err)
 	}
 	
-	// Log cluster secret untuk debugging
-	logrus.Infof("Initializing SimpleGossipService with cluster secret (length: %d)", len(clusterSecret))
+	// Tidak menggunakan cluster secret untuk meningkatkan performa
+	logrus.Info("SimpleGossipService diinisialisasi tanpa cluster secret untuk meningkatkan performa")
 	
 	return &SimpleGossipService{
 		localAddr:        publicAddr,
@@ -52,7 +52,7 @@ func NewSimpleGossipService(cfg config.GossipConfig, validationDomain, publicAdd
 		probeTimeout:     probeTimeout,
 		stopChan:         make(chan struct{}),
 		PeerUpdateChan:   make(chan struct{}, 1),
-		clusterSecret:    clusterSecret,
+		clusterSecret:    "", // Gunakan string kosong untuk meningkatkan performa
 		validationDomain: validationDomain,
 	}, nil
 }

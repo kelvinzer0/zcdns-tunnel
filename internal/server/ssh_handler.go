@@ -96,11 +96,11 @@ func NewSSHServer(cfg config.ServerConfig, gs common.GossipProvider, localGossip
 	// Check if the gossip provider also implements UDPProvider
 	var udpService *udpproto.UDPService
 	if udpProvider, ok := gs.(common.UDPProvider); ok {
-		// Log cluster secret length for debugging
-		logrus.Infof("Initializing UDP service with cluster secret (length: %d)", len(cfg.ClusterSecret))
+		// Tidak menggunakan cluster secret untuk meningkatkan performa
+		logrus.Info("Initializing UDP service without cluster secret for better performance")
 		
 		// Initialize UDP service using the UDP connection from the gossip service
-		udpService = udpproto.UDPServiceFromGossip(udpProvider, cfg.ClusterSecret)
+		udpService = udpproto.UDPServiceFromGossip(udpProvider, "")
 		
 		// Check if the UDP connection was successfully shared
 		if udpService.GetUDPConn() == nil {

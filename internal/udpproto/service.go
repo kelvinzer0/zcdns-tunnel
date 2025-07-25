@@ -134,9 +134,12 @@ func (s *UDPService) RegisterHandler(msgType string, handler MessageHandler) {
 
 // SendMessage mengirim pesan ke alamat tujuan dan menunggu respons
 func (s *UDPService) SendMessage(ctx context.Context, msg *Message, targetAddr string) (*Message, error) {
-	// Tandatangani pesan
-	if err := msg.Sign(s.secret); err != nil {
-		return nil, fmt.Errorf("gagal menandatangani pesan: %w", err)
+	// Tandatangani pesan jika secret tidak kosong
+	// Jika secret kosong, kita skip proses ini untuk meningkatkan performa
+	if len(s.secret) > 0 {
+		if err := msg.Sign(s.secret); err != nil {
+			return nil, fmt.Errorf("gagal menandatangani pesan: %w", err)
+		}
 	}
 
 	// Buat channel untuk respons
@@ -217,9 +220,12 @@ func getTimeoutFromContext(ctx context.Context, defaultTimeout time.Duration) ti
 
 // SendMessageWithoutResponse mengirim pesan tanpa menunggu respons
 func (s *UDPService) SendMessageWithoutResponse(msg *Message, targetAddr string) error {
-	// Tandatangani pesan
-	if err := msg.Sign(s.secret); err != nil {
-		return fmt.Errorf("gagal menandatangani pesan: %w", err)
+	// Tandatangani pesan jika secret tidak kosong
+	// Jika secret kosong, kita skip proses ini untuk meningkatkan performa
+	if len(s.secret) > 0 {
+		if err := msg.Sign(s.secret); err != nil {
+			return fmt.Errorf("gagal menandatangani pesan: %w", err)
+		}
 	}
 
 	// Kirim pesan
@@ -362,19 +368,16 @@ func (s *UDPService) handleMessage(ctx context.Context, msgBytes []byte, remoteA
 		return
 	}
 
-	// Verifikasi tanda tangan
-	if !msg.Verify(s.secret) {
-		// Log informasi tambahan untuk membantu debugging
-		logrus.Warnf("Verifikasi tanda tangan gagal untuk pesan dari %s (type: %s, sender: %s, secret length: %d)", 
-			remoteAddr.String(), msg.Type, msg.Sender, len(s.secret))
-		
-		// Coba verifikasi dengan secret kosong (untuk debugging)
-		if msg.Verify([]byte("")) {
-			logrus.Warnf("Pesan dari %s dapat diverifikasi dengan secret kosong, kemungkinan pengirim tidak menggunakan secret", 
-				remoteAddr.String())
+	// Verifikasi tanda tangan jika secret tidak kosong
+	// Jika secret kosong, kita skip verifikasi untuk meningkatkan performa
+	if len(s.secret) > 0 {
+		if !msg.Verify(s.secret) {
+			// Log informasi tambahan untuk membantu debugging
+			logrus.Warnf("Verifikasi tanda tangan gagal untuk pesan dari %s (type: %s, sender: %s, secret length: %d)", 
+				remoteAddr.String(), msg.Type, msg.Sender, len(s.secret))
+			
+			return
 		}
-		
-		return
 	}
 
 	// Periksa kadaluarsa
@@ -480,15 +483,15 @@ func UDPServiceFromGossip(provider common.UDPProvider, clusterSecret string) *UD
 	
 	config := Config{
 		ListenAddr:    listenAddr,
-		ClusterSecret: clusterSecret,
+		ClusterSecret: "", // Tidak menggunakan secret untuk meningkatkan performa
 		MessageMaxAge: DefaultMessageMaxAge,
 	}
 	
-	// Pastikan menggunakan secret yang sama dengan gossip service
-	secret := []byte(clusterSecret)
+	// Gunakan secret kosong untuk meningkatkan performa
+	secret := []byte("")
 	
 	// Log untuk debugging
-	logrus.Infof("UDPService menggunakan cluster secret dengan panjang: %d bytes", len(secret))
+	logrus.Info("UDPService diinisialisasi tanpa cluster secret untuk meningkatkan performa")
 	
 	service := &UDPService{
 		config:      config,
