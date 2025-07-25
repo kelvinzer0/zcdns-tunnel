@@ -18,16 +18,18 @@ import (
 type TCPProxy struct {
 	ListenAddr     string // The address this proxy listens on (e.g., 127.0.0.1:12345)
 	PublicPort     uint32 // The public port the user originally requested (e.g., 80)
+	ConnectedAddr  string // The address the client originally requested to bind to (usually IP publik node)
 	sshConn        *ssh.ServerConn
 	listener       net.Listener
 	listenerMu     sync.Mutex
 }
 
 // NewTCPProxy creates a new TCPProxy handler for a specific SSH connection.
-func NewTCPProxy(listenAddr string, publicPort uint32, sshConn *ssh.ServerConn) *TCPProxy {
+func NewTCPProxy(listenAddr string, publicPort uint32, connectedAddr string, sshConn *ssh.ServerConn) *TCPProxy {
 	return &TCPProxy{
 		ListenAddr:     listenAddr,
 		PublicPort:     publicPort,
+		ConnectedAddr:  connectedAddr,
 		sshConn:        sshConn,
 	}
 }
@@ -108,7 +110,7 @@ func (p *TCPProxy) handleConnection(conn net.Conn) {
 		OriginatorIP   string
 		OriginatorPort uint32
 	}{
-		ConnectedAddr:  "0.0.0.0", // The address the client originally requested to bind to
+		ConnectedAddr:  p.ConnectedAddr, // Menggunakan alamat yang disimpan saat inisialisasi
 		ConnectedPort:  p.PublicPort,
 		OriginatorIP:   originatorIP,
 		OriginatorPort: uint32(originatorPort),
