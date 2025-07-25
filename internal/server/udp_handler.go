@@ -90,20 +90,23 @@ func (s *SSHServer) forwardToResponsibleNode(ctx context.Context, domain, respon
 	targetAddr := s.getUDPAddressForNode(responsibleNode)
 	logrus.Infof("Mengirim request forward ke node %s di alamat %s", responsibleNode, targetAddr)
 	
-	// Implementasi retry untuk mengatasi timeout
+	// Implementasi retry untuk mengatasi timeout dan connection refused
 	maxRetries := 3
 	var resp *udpproto.Message
 	var respErr error
 	
 	for retry := 0; retry < maxRetries; retry++ {
-		// Jika ini bukan percobaan pertama, log retry
+		// Jika ini bukan percobaan pertama, log retry dan tunggu sebentar
 		if retry > 0 {
-			logrus.Infof("Percobaan ke-%d mengirim request forward ke %s", retry+1, targetAddr)
+			backoffTime := time.Duration(retry) * 500 * time.Millisecond
+			logrus.Infof("Percobaan ke-%d mengirim request forward ke %s (backoff: %v)", retry+1, targetAddr, backoffTime)
+			time.Sleep(backoffTime)
 		}
 		
 		// Kirim pesan dan tunggu respons dengan timeout yang meningkat
 		timeoutDuration := time.Duration(retry+1) * udpproto.DefaultMessageTimeout
 		ctxWithTimeout, cancel := context.WithTimeout(ctx, timeoutDuration)
+		
 		resp, respErr = s.UDPService.SendMessage(ctxWithTimeout, msg, targetAddr)
 		cancel()
 		
@@ -112,13 +115,19 @@ func (s *SSHServer) forwardToResponsibleNode(ctx context.Context, domain, respon
 			break
 		}
 		
-		// Jika error bukan timeout atau ini adalah percobaan terakhir, return error
-		if !strings.Contains(respErr.Error(), "timeout") || retry == maxRetries-1 {
-			return false, 0, fmt.Errorf("gagal mengirim pesan forward ke %s: %w", targetAddr, respErr)
+		// Log error dan tentukan apakah perlu retry
+		if strings.Contains(respErr.Error(), "timeout") {
+			logrus.Warnf("Timeout mengirim pesan ke %s (percobaan %d/%d): %v", targetAddr, retry+1, maxRetries, respErr)
+		} else if strings.Contains(respErr.Error(), "connection refused") {
+			logrus.Warnf("Koneksi ditolak oleh %s (percobaan %d/%d): %v", targetAddr, retry+1, maxRetries, respErr)
+		} else {
+			logrus.Errorf("Error mengirim pesan ke %s (percobaan %d/%d): %v", targetAddr, retry+1, maxRetries, respErr)
 		}
 		
-		// Tunggu sebentar sebelum mencoba lagi
-		time.Sleep(time.Duration(retry+1) * 500 * time.Millisecond)
+		// Jika ini adalah percobaan terakhir, return error
+		if retry == maxRetries-1 {
+			return false, 0, fmt.Errorf("gagal mengirim pesan forward ke %s setelah %d percobaan: %w", targetAddr, maxRetries, respErr)
+		}
 	}
 	
 	// Parse respons
@@ -140,17 +149,17 @@ func (s *SSHServer) getUDPAddressForNode(nodeAddr string) string {
 	host, _, err := net.SplitHostPort(nodeAddr)
 	if err != nil {
 		// Jika gagal parse, gunakan alamat asli
-		return fmt.Sprintf("%s:%d", nodeAddr, udpproto.DefaultUDPPort)
+		return fmt.Sprintf("%s:%d", nodeAddr, udpproto.AlternativeUDPPort)
 	}
 	
 	// Coba dapatkan port UDP dari node target
 	targetPeer := s.GossipService.GetPeer(host)
 	if targetPeer != nil && targetPeer.GossipPort > 0 {
-		// Jika node target menggunakan port alternatif (8946), gunakan port tersebut
-		return fmt.Sprintf("%s:%d", host, targetPeer.GossipPort + 1000)
+		// Gunakan port alternatif (8946) untuk komunikasi UDP
+		return fmt.Sprintf("%s:%d", host, udpproto.AlternativeUDPPort)
 	}
 	
 	// Jika tidak bisa mendapatkan informasi port dari peer, gunakan port alternatif (8946)
 	// karena dari log terlihat semua node menggunakan port alternatif
-	return fmt.Sprintf("%s:%d", host, udpproto.DefaultUDPPort + 1000)
+	return fmt.Sprintf("%s:%d", host, udpproto.AlternativeUDPPort)
 }

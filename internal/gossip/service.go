@@ -13,12 +13,6 @@ import (
 	"zcdns-tunnel/internal/config"
 )
 
-const (
-	// DefaultGossipPort adalah port standar untuk komunikasi gosip.
-	DefaultGossipPort = 7946
-	maxPeersToSend    = 5 // Maksimum peer yang dikirim dalam heartbeat/sync
-)
-
 // Config menampung konfigurasi untuk GossipService.
 type Config struct {
 	ListenAddr       string
@@ -205,17 +199,36 @@ func (gs *GossipService) listenForMessages() {
 	buf := make([]byte, 65536) // Ukuran buffer UDP maksimum
 
 	for {
-		n, remoteAddr, err := gs.conn.ReadFromUDP(buf)
-		if err != nil {
-			select {
-			case <-gs.stopChan:
-				return // Shutdown
-			default:
-				logrus.Errorf("Error reading from UDP: %v", err)
+		select {
+		case <-gs.stopChan:
+			return // Shutdown
+		default:
+			// Set read deadline untuk menghindari blocking selamanya
+			gs.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+			
+			n, remoteAddr, err := gs.conn.ReadFromUDP(buf)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					// Timeout, ini normal dan bukan error sebenarnya
+					continue
+				}
+				
+				// Untuk error lain, log dengan level debug saja untuk menghindari spam log
+				if opErr, ok := err.(*net.OpError); ok {
+					// Log dengan detail tipe error untuk debugging
+					logrus.Debugf("UDP read error: %s (%T)", opErr.Error(), opErr.Err)
+				} else {
+					logrus.Debugf("Non-timeout error reading from UDP: %v", err)
+				}
 				continue
 			}
+			
+			// Reset read deadline
+			gs.conn.SetReadDeadline(time.Time{})
+			
+			// Proses pesan dalam goroutine terpisah
+			go gs.handleMessage(buf[:n], remoteAddr)
 		}
-		go gs.handleMessage(buf[:n], remoteAddr)
 	}
 }
 
@@ -334,7 +347,7 @@ func (gs *GossipService) propagateNewPeer(newPeerAddr string, sshListenAddr stri
 	msgBytes, _ := json.Marshal(msg)
 
 	// Kirim ke beberapa peer acak
-	targets := gs.GetRandomPeers(maxPeersToSend, false)
+	targets := gs.GetRandomPeers(MaxPeersToSend, false)
 	for _, peerAddr := range targets {
 		go gs.sendMessage(msgBytes, peerAddr)
 	}
@@ -356,7 +369,7 @@ func (gs *GossipService) sendHeartbeats() {
 			}
 
 			heartbeatPayload, _ := json.Marshal(HeartbeatPayload{
-				KnownPeers: gs.GetRandomPeers(maxPeersToSend, true),
+				KnownPeers: gs.GetRandomPeers(MaxPeersToSend, true),
 				GossipPort: DefaultGossipPort,
 			})
 			msg := GossipMessage{
@@ -367,7 +380,7 @@ func (gs *GossipService) sendHeartbeats() {
 			msgBytes, _ := json.Marshal(msg)
 
 			// Kirim heartbeat ke beberapa peer acak
-			targets := gs.GetRandomPeers(maxPeersToSend, false)
+			targets := gs.GetRandomPeers(MaxPeersToSend, false)
 			for _, target := range targets {
 				go gs.sendMessage(msgBytes, target)
 			}

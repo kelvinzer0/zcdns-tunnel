@@ -13,6 +13,7 @@ import (
 	ssh "golang.org/x/crypto/ssh"
 
 	"zcdns-tunnel/internal/auth"
+	"zcdns-tunnel/internal/common"
 	"zcdns-tunnel/internal/config"
 	"zcdns-tunnel/internal/consistenthash"
 	"zcdns-tunnel/internal/gossip"
@@ -74,7 +75,7 @@ type SSHServer struct {
 }
 
 // NewSSHServer creates a new SSH server instance.
-func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossipAddr string) *SSHServer {
+func NewSSHServer(cfg config.ServerConfig, gs common.UDPProvider, localGossipAddr string) *SSHServer {
 	// Load inter-node SSH client key
 	interNodeSigner, err := auth.LoadHostKey(cfg.InterNodeSSHKeyPath)
 	if err != nil {
@@ -96,7 +97,7 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 	server := &SSHServer{
 		Config:                   cfg,
 		Manager:                  tunnel.NewManager(),
-		GossipService:            gs,
+		GossipService:            gs.(*gossip.GossipService), // Type assertion since we need the specific type
 		UDPService:               udpService,
 		ConsistentHash:           consistenthash.New(100, nil), // 100 virtual nodes per real node
 		LocalGossipAddr:          localGossipAddr,
