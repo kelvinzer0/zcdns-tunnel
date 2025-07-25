@@ -116,6 +116,7 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 
 	// Register UDP message handlers
 	udpService.RegisterHandler(udpproto.MessageTypeForward, server.handleForwardRequest)
+	udpService.RegisterHandler(udpproto.MessageTypeForwardResponse, server.handleForwardResponse)
 
 	return server
 }

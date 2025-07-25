@@ -116,13 +116,14 @@ func (s *SSHServer) getUDPAddressForNode(nodeAddr string) string {
 		return fmt.Sprintf("%s:%d", nodeAddr, udpproto.DefaultUDPPort)
 	}
 	
-	// Coba dapatkan port UDP dari UDPService
-	_, udpPort, err := net.SplitHostPort(s.UDPService.GetListenAddr())
-	if err != nil {
-		// Jika gagal, gunakan port UDP default
-		udpPort = fmt.Sprintf("%d", udpproto.DefaultUDPPort)
+	// Coba dapatkan port UDP dari node target
+	targetPeer := s.GossipService.GetPeer(host)
+	if targetPeer != nil && targetPeer.GossipPort > 0 {
+		// Jika node target menggunakan port alternatif (8946), gunakan port tersebut
+		return fmt.Sprintf("%s:%d", host, targetPeer.GossipPort + 1000)
 	}
 	
-	// Gunakan port UDP yang sama dengan yang kita gunakan
-	return fmt.Sprintf("%s:%s", host, udpPort)
+	// Jika tidak bisa mendapatkan informasi port dari peer, gunakan port alternatif (8946)
+	// karena dari log terlihat semua node menggunakan port alternatif
+	return fmt.Sprintf("%s:%d", host, udpproto.DefaultUDPPort + 1000)
 }
