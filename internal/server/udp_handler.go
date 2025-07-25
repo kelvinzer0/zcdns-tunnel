@@ -3,9 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"net"
-	"strings"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"zcdns-tunnel/internal/udpproto"

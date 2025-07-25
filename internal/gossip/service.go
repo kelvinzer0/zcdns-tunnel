@@ -573,3 +573,7 @@ func (gs *GossipService) GetPreferredConnectionAddress(peerAddr string) string {
 	// Fall back to the original address
 	return peerAddr
 }
+// GetPeerUpdateChan returns the channel that is notified when the peer list changes
+func (gs *GossipService) GetPeerUpdateChan() <-chan struct{} {
+	return gs.PeerUpdateChan
+}

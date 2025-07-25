@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"zcdns-tunnel/internal/grpc"
-	pb "zcdns-tunnel/internal/grpc/proto"
 	"zcdns-tunnel/internal/udpproto"
 )
 
@@ -20,7 +18,7 @@ func (s *SSHServer) forwardToResponsibleNodeGRPC(ctx context.Context, domain, re
 	}
 
 	// Extract host from responsible node address
-	host, portStr, err := net.SplitHostPort(responsibleNode)
+	host, _, err := net.SplitHostPort(responsibleNode)
 	if err != nil {
 		logrus.Warnf("Failed to parse responsible node address %s: %v", responsibleNode, err)
 		host = responsibleNode // Use as is if parsing fails

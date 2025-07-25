@@ -92,7 +92,11 @@ func main() {
 
 	// --- SSH Server Setup ---
 	// Create and start the SSH server
-	sshServer := server.NewSSHServer(cfg, gossipService, publicAddr)
+	sshServer, err := server.NewSSHServer(cfg, gossipService, publicAddr)
+	if err != nil {
+		logrus.Fatalf("Failed to create SSH server: %v", err)
+	}
+	
 	go func() {
 		if err := sshServer.StartSSHServer(ctx); err != nil {
 			logrus.Printf("SSH server exited with error: %v", err)
