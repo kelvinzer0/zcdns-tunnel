@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -19,8 +18,8 @@ import (
 	"zcdns-tunnel/internal/gossip"
 	"zcdns-tunnel/internal/proxy"
 	channelHandlers "zcdns-tunnel/internal/ssh/channel"
-	interNodeSSH "zcdns-tunnel/internal/ssh"
 	"zcdns-tunnel/internal/tunnel"
+	"zcdns-tunnel/internal/udpproto"
 )
 
 // forwarder represents an active TCP forward.
@@ -52,6 +51,7 @@ type SSHServer struct {
 
 	// Distributed system components
 	GossipService   *gossip.GossipService
+	UDPService      *udpproto.UDPService
 	ConsistentHash  *consistenthash.Map
 	LocalGossipAddr string // The local address of this node for consistent hashing
 
@@ -90,10 +90,19 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		Timeout:         5 * time.Second,
 	}
 
-	return &SSHServer{
+	// Inisialisasi UDP service
+	udpConfig := udpproto.Config{
+		ListenAddr:    fmt.Sprintf(":%d", gossip.DefaultGossipPort),
+		ClusterSecret: cfg.ClusterSecret,
+		MessageMaxAge: 10 * time.Second,
+	}
+	udpService := udpproto.NewUDPService(udpConfig, localGossipAddr)
+
+	server := &SSHServer{
 		Config:                   cfg,
 		Manager:                  tunnel.NewManager(),
 		GossipService:            gs,
+		UDPService:               udpService,
 		ConsistentHash:           consistenthash.New(100, nil), // 100 virtual nodes per real node
 		LocalGossipAddr:          localGossipAddr,
 		interNodeSSHClientConfig: interNodeSSHClientConfig,
@@ -104,6 +113,11 @@ func NewSSHServer(cfg config.ServerConfig, gs *gossip.GossipService, localGossip
 		tcpListeners:             make(map[string]context.CancelFunc),
 		forwardedClientConns:     make(map[string]*ssh.ServerConn),
 	}
+
+	// Register UDP message handlers
+	udpService.RegisterHandler(udpproto.MessageTypeForward, server.handleForwardRequest)
+
+	return server
 }
 
 // StartSSHServer starts the SSH listener.
@@ -120,6 +134,11 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 		Config:            ssh.Config{},
 	}
 	sshConfig.AddHostKey(hostSigner)
+
+	// Start UDP service for inter-node communication
+	if err := s.UDPService.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start UDP service: %w", err)
+	}
 
 	go func() {
 		for range s.GossipService.PeerUpdateChan {
@@ -191,6 +210,10 @@ func (s *SSHServer) StartSSHServer(ctx context.Context) error {
 	// Wait for context to be cancelled to gracefully shut down both listeners
 	<-ctx.Done()
 	logrus.Info("SSH servers shutting down.")
+	
+	// Stop UDP service
+	s.UDPService.Stop()
+	
 	return nil
 }
 
@@ -329,53 +352,10 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		s.forwardedClientConns[forwardID] = sshConn
 		s.mu.Unlock()
 
-		// Establish SSH connection to the responsible node
-		responsibleNodeAddr := s.GossipService.GetPreferredConnectionAddress(responsibleNode)
-		logrus.Infof("Attempting to connect to responsible node at %s", responsibleNodeAddr)
-		
-		conn, err := ssh.Dial("tcp", responsibleNodeAddr, s.interNodeSSHClientConfig)
+		// Forward the request using UDP protocol
+		ok, port, err := s.forwardToResponsibleNode(ctx, domain, responsibleNode, forwardID, payload.BindAddr, payload.BindPort, sshConn.RemoteAddr().String())
 		if err != nil {
-			logrus.WithError(err).Errorf("Failed to dial responsible node %s for forwarding", responsibleNodeAddr)
-			
-			// Try a direct connection to the gossip port as a fallback
-			host, _, _ := net.SplitHostPort(responsibleNode)
-			fallbackAddr := fmt.Sprintf("%s:%d", host, gossip.DefaultGossipPort)
-			if fallbackAddr != responsibleNodeAddr {
-				logrus.Infof("Trying fallback connection to %s", fallbackAddr)
-				conn, err = ssh.Dial("tcp", fallbackAddr, s.interNodeSSHClientConfig)
-				if err != nil {
-					logrus.WithError(err).Errorf("Failed to dial responsible node %s using fallback address", fallbackAddr)
-					req.Reply(false, nil)
-					// Clean up the stored connection if forwarding failed
-					s.mu.Lock()
-					delete(s.forwardedClientConns, forwardID)
-					s.mu.Unlock()
-					return
-				}
-			} else {
-				req.Reply(false, nil)
-				// Clean up the stored connection if forwarding failed
-				s.mu.Lock()
-				delete(s.forwardedClientConns, forwardID)
-				s.mu.Unlock()
-				return
-			}
-		}
-		defer conn.Close()
-
-		// Create a new payload for the inter-node request
-		interNodePayload := interNodeSSH.InterNodeForwardRequestPayload{
-			BindAddr:       payload.BindAddr,
-			BindPort:       payload.BindPort,
-			OriginalDomain: domain,
-			ForwardID:      forwardID,
-		}
-		interNodePayloadBytes, _ := json.Marshal(interNodePayload)
-
-		// Forward the tcpip-forward request to the responsible node
-		ok, responsePayload, err := conn.SendRequest("tcpip-forward", true, interNodePayloadBytes)
-		if err != nil {
-			logrus.WithError(err).Errorf("Failed to forward tcpip-forward request to %s", responsibleNode)
+			logrus.WithError(err).Errorf("Failed to forward request to responsible node %s", responsibleNode)
 			req.Reply(false, nil)
 			// Clean up the stored connection if forwarding failed
 			s.mu.Lock()
@@ -385,7 +365,7 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		}
 
 		// Relay the response back to the original client
-		req.Reply(ok, responsePayload)
+		req.Reply(ok, ssh.Marshal(struct{ Port uint32 }{Port: port}))
 		return
 	}
 

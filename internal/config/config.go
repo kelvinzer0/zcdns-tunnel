@@ -16,6 +16,7 @@ type ServerConfig struct {
 	SshHostKeyPath     string `mapstructure:"ssh_host_key_path"`
 	ValidationDomain   string `mapstructure:"validation_domain"`
 	InterNodeSSHKeyPath string `mapstructure:"inter_node_ssh_key_path"`
+	ClusterSecret      string `mapstructure:"cluster_secret"`
 	Gossip             GossipConfig `mapstructure:"gossip"`
 }
 
