@@ -92,7 +92,8 @@ func NewSSHServer(cfg config.ServerConfig, gs common.GossipProvider, localGossip
 			ssh.PublicKeys(interNodeSigner),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // WARNING: Insecure for production. Consider known_hosts or custom validation.
-		Timeout:         5 * time.Second,
+		Timeout:         15 * time.Second, // Increased timeout for inter-node connections
+		ClientVersion:   "SSH-2.0-ZCDNS-TUNNEL", // Custom client version string
 	}
 
 	// Check if the gossip provider also implements UDPProvider
@@ -265,18 +266,59 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConf
 
 	// For TCP connections, set TCP keepalive to detect and recover from network issues
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		// Set TCP keepalive to detect dead connections
+		// Set TCP keepalive with a more aggressive period to detect dead connections faster
 		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		tcpConn.SetKeepAlivePeriod(15 * time.Second) // More frequent keepalive checks
 		
 		// Set a longer timeout for the SSH handshake
-		tcpConn.SetDeadline(time.Now().Add(30 * time.Second))
+		tcpConn.SetDeadline(time.Now().Add(60 * time.Second)) // Increased timeout for handshake
+		
+		// Set larger buffer sizes to handle more data
+		tcpConn.SetReadBuffer(65536)  // 64KB read buffer
+		tcpConn.SetWriteBuffer(65536) // 64KB write buffer
 	}
 
-	// Try to establish SSH connection with better error handling
-	sshConn, chans, reqs, err := ssh.NewServerConn(conn, sshConfig)
+	// Try to establish SSH connection with better error handling and retry logic
+	var sshConn *ssh.ServerConn
+	var chans <-chan ssh.NewChannel
+	var reqs <-chan *ssh.Request
+	var err error
 	
-	// Reset the deadline after handshake
+	// Implement retry logic for SSH handshake
+	maxRetries := 3
+	for retry := 0; retry < maxRetries; retry++ {
+		// Reset the deadline for each attempt
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetDeadline(time.Now().Add(60 * time.Second))
+		}
+		
+		// Try to establish SSH connection
+		sshConn, chans, reqs, err = ssh.NewServerConn(conn, sshConfig)
+		
+		// If successful, break out of the retry loop
+		if err == nil {
+			break
+		}
+		
+		// If this is the last retry, we'll handle the error after the loop
+		if retry == maxRetries-1 {
+			break
+		}
+		
+		// Log the retry attempt
+		logrus.WithFields(logrus.Fields{
+			"remote_addr": conn.RemoteAddr(),
+			"retry":       retry + 1,
+			"max_retries": maxRetries,
+			"error":       err,
+		}).Warn("SSH handshake failed, retrying...")
+		
+		// Add exponential backoff between retries
+		backoffTime := time.Duration(1<<uint(retry)) * 200 * time.Millisecond
+		time.Sleep(backoffTime)
+	}
+	
+	// Reset the deadline after handshake attempts
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetDeadline(time.Time{})
 	}
@@ -300,6 +342,18 @@ func (s *SSHServer) handleSSHConnection(conn net.Conn, sshConfig *ssh.ServerConf
 		if err == io.EOF {
 			logFields["error_type"] = "EOF"
 			logrus.WithFields(logFields).Error("SSH handshake failed with EOF - client disconnected prematurely")
+			
+			// Try to diagnose network issues
+			if tcpConn, ok := conn.(*net.TCPConn); ok {
+				// Log local and remote addresses for debugging
+				logrus.WithFields(logFields).Info("Connection details for EOF error - check firewall rules and network connectivity")
+				
+				// Attempt to get socket error status
+				socketErr := tcpConn.SetKeepAlive(true)
+				if socketErr != nil {
+					logrus.WithFields(logFields).WithError(socketErr).Info("Socket appears to be in error state")
+				}
+			}
 		} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			logFields["error_type"] = "Timeout"
 			logrus.WithFields(logFields).Error("SSH handshake failed with timeout - consider increasing handshake timeout")

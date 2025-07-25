@@ -47,10 +47,29 @@ func (h *sshForwardHandler) HandleForwardRequest(ctx context.Context, req *pb.Fo
 
 	// Check if this node is responsible for the domain
 	responsibleNode := h.server.ConsistentHash.Get(req.Domain)
+	
+	// Log detailed information about node responsibility
+	logrus.WithFields(logrus.Fields{
+		"domain":           req.Domain,
+		"responsible_node": responsibleNode,
+		"current_node":     h.server.LocalGossipAddr,
+		"is_responsible":   responsibleNode == h.server.LocalGossipAddr,
+	}).Info("Checking node responsibility for domain")
+	
 	if responsibleNode != h.server.LocalGossipAddr {
 		errMsg := fmt.Sprintf("Node ini (%s) tidak bertanggung jawab untuk domain %s, node yang bertanggung jawab adalah %s",
 			h.server.LocalGossipAddr, req.Domain, responsibleNode)
 		logrus.Warn(errMsg)
+
+		// Log the active peers in the consistent hash ring for debugging
+		activePeers := h.server.GossipService.GetActivePeerAddrs()
+		logrus.WithFields(logrus.Fields{
+			"domain":           req.Domain,
+			"responsible_node": responsibleNode,
+			"current_node":     h.server.LocalGossipAddr,
+			"active_peers":     activePeers,
+			"peer_count":       len(activePeers),
+		}).Warn("Not responsible for domain, rejecting forward request")
 
 		return &pb.ForwardResponseMessage{
 			ForwardId: req.ForwardId,
@@ -62,6 +81,14 @@ func (h *sshForwardHandler) HandleForwardRequest(ctx context.Context, req *pb.Fo
 	// Process the forward request
 	// This is a placeholder - in a real implementation, you would handle the actual forwarding
 	// For now, we'll just return a success response with the same port
+	logrus.WithFields(logrus.Fields{
+		"domain":        req.Domain,
+		"bind_addr":     req.BindAddr,
+		"bind_port":     req.BindPort,
+		"forward_id":    req.ForwardId,
+		"original_addr": req.OriginalAddr,
+	}).Info("Successfully handled forward request, returning success response")
+	
 	return &pb.ForwardResponseMessage{
 		ForwardId: req.ForwardId,
 		Success:   true,
@@ -105,19 +132,26 @@ func (h *sshForwardHandler) HandleGetIntermediaryAddr(ctx context.Context, req *
 	// Get the intermediary address from the shared state
 	key := fmt.Sprintf("%s:%s:%d", req.Domain, req.ProtocolPrefix, req.PublicPort)
 	intermediaryAddr, ok := h.sharedIntermediaryAddrs.Load(key)
+	
+	// Log the result of the lookup
+	logFields := logrus.Fields{
+		"key":            key,
+		"domain":         req.Domain,
+		"protocol_prefix": req.ProtocolPrefix,
+		"public_port":    req.PublicPort,
+		"found_in_shared": ok,
+	}
+	
 	if !ok {
-		logrus.WithFields(logrus.Fields{
-			"key": key,
-		}).Warn("Intermediary address not found in shared state")
+		logrus.WithFields(logFields).Warn("Intermediary address not found in shared state")
 		
 		// Try to get it from the tunnel manager
 		addrStr, ok := h.server.Manager.LoadBridgeAddress(req.Domain, req.ProtocolPrefix, req.PublicPort)
 		if !ok {
-			logrus.WithFields(logrus.Fields{
-				"domain":          req.Domain,
-				"protocol_prefix": req.ProtocolPrefix,
-				"public_port":     req.PublicPort,
-			}).Warn("Intermediary address not found in tunnel manager")
+			logrus.WithFields(logFields).Warn("Intermediary address not found in tunnel manager")
+			
+			// Log active bridge addresses for debugging
+			h.logActiveBridgeAddresses()
 			
 			return &pb.IntermediaryAddrMessage{
 				Domain:          req.Domain,
@@ -132,13 +166,14 @@ func (h *sshForwardHandler) HandleGetIntermediaryAddr(ctx context.Context, req *
 			}, nil
 		}
 		
+		logFields["found_in_manager"] = true
+		logFields["intermediary_addr"] = addrStr
+		logrus.WithFields(logFields).Info("Retrieved intermediary address from tunnel manager")
 		intermediaryAddr = addrStr
+	} else {
+		logFields["intermediary_addr"] = intermediaryAddr
+		logrus.WithFields(logFields).Info("Retrieved intermediary address from shared state")
 	}
-	
-	logrus.WithFields(logrus.Fields{
-		"key":               key,
-		"intermediary_addr": intermediaryAddr,
-	}).Info("Retrieved intermediary address from shared state")
 
 	return &pb.IntermediaryAddrMessage{
 		Domain:          req.Domain,
@@ -151,4 +186,19 @@ func (h *sshForwardHandler) HandleGetIntermediaryAddr(ctx context.Context, req *
 			GossipPort: int32(h.server.Config.Gossip.GrpcPort),
 		},
 	}, nil
+}
+
+// logActiveBridgeAddresses logs all active bridge addresses for debugging
+func (h *sshForwardHandler) logActiveBridgeAddresses() {
+	// Log all shared intermediary addresses
+	addresses := make(map[string]string)
+	h.sharedIntermediaryAddrs.Range(func(key, value interface{}) bool {
+		addresses[key.(string)] = value.(string)
+		return true
+	})
+	
+	logrus.WithFields(logrus.Fields{
+		"shared_addresses": addresses,
+		"count":            len(addresses),
+	}).Info("Current shared intermediary addresses")
 }
