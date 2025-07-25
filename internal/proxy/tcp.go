@@ -26,6 +26,9 @@ type TCPProxy struct {
 
 // NewTCPProxy creates a new TCPProxy handler for a specific SSH connection.
 func NewTCPProxy(listenAddr string, publicPort uint32, connectedAddr string, sshConn *ssh.ServerConn) *TCPProxy {
+	// Log untuk debugging
+	logrus.Infof("Creating new TCPProxy with ConnectedAddr: %s", connectedAddr)
+	
 	return &TCPProxy{
 		ListenAddr:     listenAddr,
 		PublicPort:     publicPort,
@@ -103,6 +106,9 @@ func (p *TCPProxy) handleConnection(conn net.Conn) {
 
 	originatorIP, originatorPortStr, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	originatorPort, _ := strconv.Atoi(originatorPortStr)
+
+	// Log untuk debugging
+	logrus.Infof("Creating SSH payload with ConnectedAddr: %s", p.ConnectedAddr)
 
 	payload := ssh.Marshal(&struct {
 		ConnectedAddr  string

@@ -521,7 +521,8 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		intermediaryAddr := "127.0.0.1:0"
 		// This TCPProxy is special: it listens on the intermediary address, but its job is
 		// to forward traffic to the *specific* sshConn that requested it.
-		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, payload.BindPort, s.LocalGossipAddr, sshConn)
+		publicIP := s.getPublicIPFromGossipAddr()
+		intermediaryProxy := proxy.NewTCPProxy(intermediaryAddr, payload.BindPort, publicIP, sshConn)
 		intermedCtx, intermedCancel := context.WithCancel(ctx)
 
 		go func() {
@@ -665,7 +666,8 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 		return
 	}
 
-	tcpProxy := proxy.NewTCPProxy(publicListenAddr, payload.BindPort, s.LocalGossipAddr, sshConn)
+	publicIP := s.getPublicIPFromGossipAddr()
+	tcpProxy := proxy.NewTCPProxy(publicListenAddr, payload.BindPort, publicIP, sshConn)
 	listenerCtx, cancel := context.WithCancel(ctx)
 
 	go func() {
@@ -732,4 +734,18 @@ func (s *SSHServer) handleCancelTCPIPForward(req *ssh.Request, activeForwards ma
 		req.Reply(false, nil)
 		logrus.WithField("listen_addr", publicListenAddr).Warn("Received cancel request for unknown forward")
 	}
+}
+
+// getPublicIPFromGossipAddr mengekstrak alamat IP publik dari alamat gossip (format: IP:port)
+func (s *SSHServer) getPublicIPFromGossipAddr() string {
+	host, _, err := net.SplitHostPort(s.LocalGossipAddr)
+	if err != nil {
+		logrus.Warnf("Failed to parse LocalGossipAddr %s: %v", s.LocalGossipAddr, err)
+		return s.LocalGossipAddr // Return as is if parsing fails
+	}
+	
+	// Log untuk debugging
+	logrus.Infof("Extracted public IP %s from gossip address %s", host, s.LocalGossipAddr)
+	
+	return host
 }
