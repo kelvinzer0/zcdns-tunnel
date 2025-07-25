@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"zcdns-tunnel/internal/udpproto"
@@ -88,10 +90,35 @@ func (s *SSHServer) forwardToResponsibleNode(ctx context.Context, domain, respon
 	targetAddr := s.getUDPAddressForNode(responsibleNode)
 	logrus.Infof("Mengirim request forward ke node %s di alamat %s", responsibleNode, targetAddr)
 	
-	// Kirim pesan dan tunggu respons
-	resp, err := s.UDPService.SendMessage(ctx, msg, targetAddr)
-	if err != nil {
-		return false, 0, fmt.Errorf("gagal mengirim pesan forward ke %s: %w", targetAddr, err)
+	// Implementasi retry untuk mengatasi timeout
+	maxRetries := 3
+	var resp *udpproto.Message
+	var respErr error
+	
+	for retry := 0; retry < maxRetries; retry++ {
+		// Jika ini bukan percobaan pertama, log retry
+		if retry > 0 {
+			logrus.Infof("Percobaan ke-%d mengirim request forward ke %s", retry+1, targetAddr)
+		}
+		
+		// Kirim pesan dan tunggu respons dengan timeout yang meningkat
+		timeoutDuration := time.Duration(retry+1) * udpproto.DefaultMessageTimeout
+		ctxWithTimeout, cancel := context.WithTimeout(ctx, timeoutDuration)
+		resp, respErr = s.UDPService.SendMessage(ctxWithTimeout, msg, targetAddr)
+		cancel()
+		
+		// Jika berhasil, keluar dari loop
+		if respErr == nil {
+			break
+		}
+		
+		// Jika error bukan timeout atau ini adalah percobaan terakhir, return error
+		if !strings.Contains(respErr.Error(), "timeout") || retry == maxRetries-1 {
+			return false, 0, fmt.Errorf("gagal mengirim pesan forward ke %s: %w", targetAddr, respErr)
+		}
+		
+		// Tunggu sebentar sebelum mencoba lagi
+		time.Sleep(time.Duration(retry+1) * 500 * time.Millisecond)
 	}
 	
 	// Parse respons

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,20 +150,56 @@ func (s *UDPService) SendMessage(ctx context.Context, msg *Message, targetAddr s
 		s.mu.Unlock()
 	}()
 
-	// Kirim pesan
-	if err := s.sendMessageRaw(msg, targetAddr); err != nil {
-		return nil, err
+	// Kirim pesan dengan retry untuk mengatasi packet loss
+	maxRetries := 2
+	for i := 0; i <= maxRetries; i++ {
+		// Jika ini bukan percobaan pertama, tunggu sebentar sebelum mencoba lagi
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 200 * time.Millisecond)
+			logrus.Debugf("Retry %d sending message to %s", i, targetAddr)
+		}
+		
+		// Kirim pesan
+		if err := s.sendMessageRaw(msg, targetAddr); err != nil {
+			if i == maxRetries {
+				return nil, err
+			}
+			logrus.Warnf("Failed to send message to %s (attempt %d/%d): %v", targetAddr, i+1, maxRetries+1, err)
+			continue
+		}
+		
+		// Tunggu respons atau timeout
+		timeoutChan := time.After(getTimeoutFromContext(ctx, DefaultMessageTimeout))
+		select {
+		case resp := <-respChan:
+			return resp, nil
+		case <-timeoutChan:
+			if i == maxRetries {
+				return nil, fmt.Errorf("timeout menunggu respons dari %s", targetAddr)
+			}
+			logrus.Warnf("Timeout waiting for response from %s (attempt %d/%d)", targetAddr, i+1, maxRetries+1)
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
+	
+	// Jika kita sampai di sini, semua retry telah gagal
+	return nil, fmt.Errorf("timeout menunggu respons dari %s setelah %d percobaan", targetAddr, maxRetries+1)
+}
 
-	// Tunggu respons atau timeout
-	select {
-	case resp := <-respChan:
-		return resp, nil
-	case <-time.After(DefaultMessageTimeout):
-		return nil, fmt.Errorf("timeout menunggu respons dari %s", targetAddr)
-	case <-ctx.Done():
-		return nil, ctx.Err()
+// getTimeoutFromContext mendapatkan timeout dari context atau menggunakan default
+func getTimeoutFromContext(ctx context.Context, defaultTimeout time.Duration) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return defaultTimeout
 	}
+	
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return time.Millisecond // Minimal timeout
+	}
+	
+	return remaining
 }
 
 // SendMessageWithoutResponse mengirim pesan tanpa menunggu respons
@@ -189,9 +226,22 @@ func (s *UDPService) sendMessageRaw(msg *Message, targetAddr string) error {
 		return fmt.Errorf("gagal serialize pesan: %w", err)
 	}
 
+	// Set write deadline untuk menghindari blocking selamanya
+	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	
 	// Kirim pesan
 	_, err = s.conn.WriteToUDP(msgBytes, addr)
+	
+	// Reset write deadline
+	s.conn.SetWriteDeadline(time.Time{})
+	
 	if err != nil {
+		// Periksa apakah error adalah timeout atau connection refused
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return fmt.Errorf("timeout saat mengirim pesan ke %s", targetAddr)
+		} else if opErr, ok := err.(*net.OpError); ok && strings.Contains(opErr.Error(), "connection refused") {
+			return fmt.Errorf("koneksi ditolak saat mengirim pesan ke %s", targetAddr)
+		}
 		return fmt.Errorf("gagal kirim pesan ke %s: %w", targetAddr, err)
 	}
 
