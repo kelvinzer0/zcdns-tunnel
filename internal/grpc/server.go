@@ -56,7 +56,9 @@ func NewGRPCServer(cfg config.GossipConfig, localAddr string) *GRPCServer {
 // Start starts the gRPC server
 func (s *GRPCServer) Start(ctx context.Context) error {
 	// Create a listener on the configured port
-	addr := fmt.Sprintf(":%d", s.config.GrpcPort)
+	// Bind to all interfaces (0.0.0.0) to ensure the server is accessible from other nodes
+	addr := fmt.Sprintf("0.0.0.0:%d", s.config.GrpcPort)
+	logrus.Infof("Starting gRPC server on %s", addr)
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", addr, err)

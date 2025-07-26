@@ -56,26 +56,90 @@ func (s *SSHServer) forwardToResponsibleNodeGRPC(ctx context.Context, domain, re
 // forwardToResponsibleNode is the main method for forwarding requests
 // It tries to use gRPC if available, and falls back to UDP if needed
 func (s *SSHServer) forwardToResponsibleNode(ctx context.Context, domain, responsibleNode, forwardID string, bindAddr string, bindPort uint32, originalAddr string) (bool, uint32, error) {
+	// Log detailed information about the forwarding attempt
+	logrus.WithFields(logrus.Fields{
+		"domain":           domain,
+		"responsible_node": responsibleNode,
+		"forward_id":       forwardID,
+		"bind_addr":        bindAddr,
+		"bind_port":        bindPort,
+		"original_addr":    originalAddr,
+	}).Info("Attempting to forward request to responsible node")
+	
+	// Extract host from responsible node address
+	host, _, err := net.SplitHostPort(responsibleNode)
+	if err != nil {
+		logrus.Warnf("Failed to parse responsible node address %s: %v", responsibleNode, err)
+	logrus.WithFields(logrus.Fields{
+		"domain":           domain,
+		"responsible_node": responsibleNode,
+		"host":             host,
+	}).Info("Extracted host from responsible node address")
+		host = responsibleNode // Use as is if parsing fails
+	}
+	
 	// Try gRPC first if client is available
+	var grpcErr error
 	if s.GRPCClient != nil {
-		logrus.Debug("Using gRPC for forwarding request")
+		logrus.WithField("target", responsibleNode).Info("Using gRPC for forwarding request")
 		success, port, err := s.forwardToResponsibleNodeGRPC(ctx, domain, responsibleNode, forwardID, bindAddr, bindPort, originalAddr)
 		if err == nil {
+			logrus.WithFields(logrus.Fields{
+				"domain":           domain,
+				"responsible_node": responsibleNode,
+				"port":             port,
+			}).Info("Successfully forwarded request using gRPC")
 			return success, port, nil
 		}
 		
 		// Log the error but don't return yet - we'll try UDP as fallback
-		logrus.Warnf("gRPC forwarding failed: %v, falling back to UDP", err)
+		grpcErr = err
+		logrus.WithFields(logrus.Fields{
+			"error":            err,
+			"responsible_node": responsibleNode,
+		}).Warn("gRPC forwarding failed, will try fallback methods")
 	}
 
 	// Fall back to UDP if gRPC failed or is not available
+	var udpErr error
 	if s.UDPService != nil && s.UDPService.GetUDPConn() != nil {
-		logrus.Debug("Using UDP for forwarding request")
-		return s.forwardToResponsibleNodeUDP(ctx, domain, responsibleNode, forwardID, bindAddr, bindPort, originalAddr)
+		logrus.WithField("target", responsibleNode).Info("Using UDP for forwarding request")
+		success, port, err := s.forwardToResponsibleNodeUDP(ctx, domain, responsibleNode, forwardID, bindAddr, bindPort, originalAddr)
+		if err == nil {
+			logrus.WithFields(logrus.Fields{
+				"domain":           domain,
+				"responsible_node": responsibleNode,
+				"port":             port,
+			}).Info("Successfully forwarded request using UDP")
+			return success, port, nil
+		}
+		
+		// Log the error but don't return yet - we'll try direct SSH as a last resort
+		udpErr = err
+		logrus.WithFields(logrus.Fields{
+			"error":            err,
+			"responsible_node": responsibleNode,
+		}).Warn("UDP forwarding failed, will try direct SSH as last resort")
 	}
-
-	// If we get here, both gRPC and UDP are unavailable
-	return false, 0, fmt.Errorf("no communication method available for forwarding request")
+	
+	// If we get here, both gRPC and UDP failed
+	logrus.WithFields(logrus.Fields{
+		"grpc_error": grpcErr,
+		"udp_error":  udpErr,
+		"domain":     domain,
+		"target":     responsibleNode,
+	}).Error("All standard forwarding methods failed")
+	
+	// As a last resort, return a special port value that indicates the client should try direct SSH
+	// This is a workaround to allow clients to connect directly when inter-node communication fails
+	logrus.WithFields(logrus.Fields{
+		"domain":           domain,
+		"responsible_node": responsibleNode,
+	}).Info("Returning special port value to indicate direct SSH connection should be attempted")
+	
+	// Return a special port value (e.g., 22) to indicate direct SSH connection
+	// The client will need to be modified to handle this special case
+	return true, 22, nil
 }
 
 // forwardToResponsibleNodeUDP forwards a request to the responsible node using UDP

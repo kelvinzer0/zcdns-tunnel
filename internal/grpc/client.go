@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -30,10 +31,41 @@ func NewGRPCClient(cfg config.GossipConfig, localAddr string) *GRPCClient {
 	}
 }
 
-// dialPeer creates a gRPC connection to a peer
+// dialPeer creates a gRPC connection to a peer with improved error handling and diagnostics
 func (c *GRPCClient) dialPeer(addr string, port int32) (*grpc.ClientConn, error) {
 	target := fmt.Sprintf("%s:%d", addr, port)
-	logrus.Debugf("Attempting to dial gRPC peer at %s", target)
+	logrus.Infof("Attempting to dial gRPC peer at %s", target)
+	
+	// First, check if the target is reachable with a simple TCP connection
+	// This helps diagnose network connectivity issues early
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	testConn, err := dialer.Dial("tcp", target)
+	if err != nil {
+		// Log detailed error information for network diagnostics
+		logrus.WithFields(logrus.Fields{
+			"target": target,
+			"error":  err,
+		}).Error("Failed basic TCP connectivity test to peer - check firewall rules and network connectivity")
+		
+		// Check if this is a DNS resolution issue
+		if dnsErr, ok := err.(*net.DNSError); ok {
+			logrus.WithFields(logrus.Fields{
+				"target":  target,
+				"dns_err": dnsErr,
+			}).Error("DNS resolution failed for peer")
+		}
+		
+		// Check if this is a timeout issue
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			logrus.WithFields(logrus.Fields{
+				"target": target,
+			}).Error("Connection timed out - peer may be down or blocked by firewall")
+		}
+		
+		return nil, fmt.Errorf("failed basic TCP connectivity test to %s: %w", target, err)
+	}
+	testConn.Close() // Close the test connection
+	logrus.Infof("Basic TCP connectivity to %s confirmed", target)
 	
 	// Configure dial options with more robust settings
 	opts := []grpc.DialOption{

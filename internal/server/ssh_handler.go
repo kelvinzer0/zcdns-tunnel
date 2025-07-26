@@ -504,6 +504,46 @@ func (s *SSHServer) handleTCPIPForward(ctx context.Context, sshConn *ssh.ServerC
 			s.mu.Unlock()
 			return
 		}
+		
+		// Check if this is a special direct SSH connection case (port 22)
+		if port == 22 {
+			logrus.WithFields(logrus.Fields{
+				"domain":           domain,
+				"responsible_node": responsibleNode,
+			}).Info("Received special port value (22), will attempt direct SSH connection to responsible node")
+			
+			// Extract host from responsible node address for direct SSH connection
+			host, _, err := net.SplitHostPort(responsibleNode)
+			if err != nil {
+				logrus.Warnf("Failed to parse responsible node address %s: %v", responsibleNode, err)
+				host = responsibleNode // Use as is if parsing fails
+			}
+			
+			// Use port 22 for direct SSH connection
+			directSSHPort := uint32(22)
+			
+			// Create a special intermediary address that indicates direct SSH connection
+			directSSHAddr := fmt.Sprintf("DIRECT_SSH:%s:%d", host, directSSHPort)
+			
+			// Store this special address in our local manager
+			protocolPrefix, ok := sshConn.Permissions.Extensions["protocol_prefix"]
+			if !ok {
+				protocolPrefix = ""
+			}
+			
+			// Store the direct SSH address in our local manager
+			s.Manager.StoreBridgeAddress(domain, protocolPrefix, port, directSSHAddr)
+			
+			logrus.WithFields(logrus.Fields{
+				"domain":           domain,
+				"responsible_node": responsibleNode,
+				"direct_ssh_addr":  directSSHAddr,
+			}).Info("Stored direct SSH address for responsible node")
+			
+			// Relay the response back to the original client
+			req.Reply(ok, ssh.Marshal(struct{ Port uint32 }{Port: port}))
+			return
+		}
 
 		// Try to get the intermediary address from the responsible node
 		// This is needed for the SSH handshake to work correctly

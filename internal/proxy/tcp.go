@@ -3,8 +3,10 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,6 +112,57 @@ func (p *TCPProxy) handleConnection(conn net.Conn) {
 	// Log untuk debugging
 	logrus.Infof("Creating SSH payload with ConnectedAddr: %s", p.ConnectedAddr)
 
+	// Check if this is a direct SSH connection
+	if strings.HasPrefix(p.ConnectedAddr, "DIRECT_SSH:") {
+		// Extract the target host and port from the direct SSH address
+		parts := strings.Split(p.ConnectedAddr, ":")
+		if len(parts) >= 3 {
+			targetHost := parts[1]
+			targetPortStr := parts[2]
+			targetPort, err := strconv.Atoi(targetPortStr)
+			if err != nil {
+				logrus.WithError(err).Errorf("Failed to parse direct SSH port: %s", targetPortStr)
+				return
+			}
+			
+			logrus.WithFields(logrus.Fields{
+				"target_host": targetHost,
+				"target_port": targetPort,
+				"remote_addr": conn.RemoteAddr(),
+			}).Info("Attempting direct SSH connection to responsible node")
+			
+			// Establish a direct TCP connection to the target
+			targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
+			targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+			if err != nil {
+				logrus.WithError(err).Errorf("Failed to establish direct SSH connection to %s", targetAddr)
+				return
+			}
+			defer targetConn.Close()
+			
+			logrus.WithFields(logrus.Fields{
+				"target_addr": targetAddr,
+				"remote_addr": conn.RemoteAddr(),
+			}).Info("Successfully established direct SSH connection to responsible node")
+			
+			// Proxy data between the client and the target
+			go func() {
+				_, err := io.Copy(targetConn, conn)
+				if err != nil && err != io.EOF {
+					logrus.WithError(err).Error("Error copying data from client to target")
+				}
+			}()
+			
+			_, err = io.Copy(conn, targetConn)
+			if err != nil && err != io.EOF {
+				logrus.WithError(err).Error("Error copying data from target to client")
+			}
+			
+			return
+		}
+	}
+
+	// Regular SSH channel forwarding
 	payload := ssh.Marshal(&struct {
 		ConnectedAddr  string
 		ConnectedPort  uint32
